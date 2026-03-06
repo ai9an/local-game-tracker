@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Game Tracker</title>
+  <!-- GitHub Pages SPA redirect trick:
+       Any 404 (direct URL, refresh) gets routed back to index.html
+       while preserving the hash for the SPA router. -->
+  <script>
+    // Encode the path as a query parameter, redirect to root
+    var path = window.location.pathname;
+    var query = window.location.search;
+    var hash  = window.location.hash;
+    window.location.replace(
+      window.location.origin + window.location.pathname.split('/').slice(0,2).join('/') +
+      '/?p=' + encodeURIComponent(path.slice(1)) + (query?'&'+query.slice(1):'') + hash
+    );
+  </script>
+</head>
+<body></body>
+</html>
