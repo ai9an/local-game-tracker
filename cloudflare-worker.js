@@ -1,9 +1,8 @@
 /**
  * Game Tracker — Cloudflare Worker (sync relay)
  *
- * ─────────────────────────────────────────────────
  * DEPLOY STEPS (takes about 5 minutes, free forever)
- * ─────────────────────────────────────────────────
+ *
  * 1. Sign up free at https://workers.cloudflare.com and navigate to Workers & Pages
  * 2. Create application → Start with hello world → Deploy → Edit code and paste this file in, then deploy
  * 3. Navigate to Storage & Databases → Workers KV → Create instance called "GameTrackerSync"
@@ -11,7 +10,8 @@
  * 5. Optionally change your workers URL
  * 6. Copy your worker URL (e.g. https://projectname.yourname.workers.dev)
  * 7. Paste it in Game Tracker → Settings → Sync → Worker URL → Save
- *
+ * *
+ * Free tier limits: 100,000 requests/day, 1GB KV storage
  */
 
 export default {

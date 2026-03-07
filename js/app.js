@@ -5,7 +5,8 @@ import * as Views from './views.js';
 import { toast, confirm, h } from './ui.js';
 import { initSync, startSync, stopSync, discoverRemoteProfiles } from './sync.js';
 
-let currentUser = null;
+let currentUser  = null;
+let _isViewOnly  = false;
 
 /* ── Profile selector ─────────────────────────────── */
 async function showProfileSelector() {
@@ -27,8 +28,6 @@ async function showProfileSelector() {
   if (workerUrl) {
     try { remoteUsers = await discoverRemoteProfiles(workerUrl); } catch(e) {}
   }
-
-  // Filter remote users that aren't already local
   const localNames  = new Set(profiles.map(p => p.username.toLowerCase()));
   const remoteExtra = remoteUsers.filter(u => !localNames.has(u.toLowerCase()));
 
@@ -83,6 +82,16 @@ async function showProfileSelector() {
           <p id="createError" style="color:var(--red);font-size:.78rem;margin-top:.3rem;display:none"></p>
         </div>
 
+        <!-- Section 7: View someone else's profile -->
+        <div class="profile-divider"><span>or</span></div>
+        <div style="text-align:center">
+          <label class="btn-outline" style="cursor:pointer;display:inline-block">
+            👁 View Someone Else's Profile
+            <input type="file" id="viewOtherFile" accept=".json" style="display:none">
+          </label>
+          <p style="font-size:.72rem;color:var(--text3);margin-top:.5rem">Load a view-only exported profile file</p>
+        </div>
+
         <p class="profile-privacy-note">🔒 Data stored locally in your browser${workerUrl ? ' · ☁️ Cloud sync active' : ''}</p>
       </div>
     </div>`;
@@ -104,9 +113,30 @@ async function showProfileSelector() {
     const item = e.target.closest('.profile-list-item-remote');
     if (!item) return;
     const name = item.dataset.username;
-    // Create locally then login (sync will pull their data automatically)
     try { await createProfile(name); } catch(e) {}
     loginAs(name);
+  });
+
+  // View-only profile loading (Section 7)
+  document.getElementById('viewOtherFile').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (!data.username) throw new Error('Invalid profile file');
+      // Import temporarily with a view-only marker
+      const viewName = `${data.username} (view-only)`;
+      // Check if already imported
+      const existing = profiles.find(p => p.username === viewName);
+      if (!existing) {
+        const importData = { ...data, username: viewName };
+        const { importProfile } = await import('./db.js');
+        await importProfile(importData);
+      }
+      loginAs(viewName, true /* viewOnly */);
+    } catch(err) {
+      toast('Could not load profile file — make sure it is a valid Game Tracker export', 'error');
+    }
   });
 
   const input = document.getElementById('newUsername');
@@ -131,17 +161,17 @@ async function showProfileSelector() {
 }
 
 /* ── Login ────────────────────────────────────────── */
-async function loginAs(username) {
-  await touchProfile(username);
-  currentUser = username;
+async function loginAs(username, viewOnly = false) {
+  if (!viewOnly) await touchProfile(username);
+  currentUser  = username;
+  _isViewOnly  = viewOnly;
 
   const settings = await getAllSettings(username);
 
-  // Apply saved theme & accent immediately
+  // Apply saved theme & accent
   if (settings.accent_color) {
     document.documentElement.style.setProperty('--accent',  settings.accent_color);
     document.documentElement.style.setProperty('--accent2', settings.accent_color + 'cc');
-    // Also persist to localStorage for the FOUC-prevention script
     try {
       localStorage.setItem('gt_accent_' + username, settings.accent_color);
       localStorage.setItem('gt_theme_'  + username, settings.theme || 'dark');
@@ -149,32 +179,83 @@ async function loginAs(username) {
   }
   if (settings.theme) {
     document.documentElement.setAttribute('data-theme', settings.theme);
+    const metaTheme = document.getElementById('themeColorMeta');
+    if (metaTheme) metaTheme.content = settings.theme === 'light' ? '#f2f1ed' : '#0e0e10';
   }
 
-  Views.init(username, navigate);
+  Views.init(username, navigate, viewOnly);
 
-  // Start sync
-  initSync(username);
-  if (settings.sync_enabled === 'true') {
-    await startSync(username, settings.sync_worker_url || null);
+  // Start sync (only for non-view-only)
+  if (!viewOnly) {
+    initSync(username);
+    if (settings.sync_enabled === 'true') {
+      await startSync(username, settings.sync_worker_url || null);
+    }
   }
 
-  // Refresh view on sync events
   window.addEventListener('gt:synced', () => {
-    const path = location.hash.slice(1) || 'dashboard';
-    dispatch(path);
+    // Section 1.3/1.4: Don't re-render if user is mid-interaction
+    const modalOpen  = !!document.querySelector('.modal-overlay[style*="flex"]');
+    const acOpen     = !!document.querySelector('.autocomplete-dropdown[style*="block"]');
+    const inputFocus = document.activeElement &&
+      ['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName);
+    if (modalOpen || acOpen || inputFocus) return;
+
+    const path    = location.hash.slice(1) || 'dashboard';
+    const current = path.split('/')[0];
+    // Only auto-refresh views with no user-editable state
+    if (['dashboard','stats','library','wishlist','browse'].includes(current)) {
+      dispatch(path);
+    }
   });
 
   document.getElementById('app-nav').style.display = 'flex';
+
+  // Add view-only banner if needed
+  if (viewOnly) {
+    const banner = document.createElement('div');
+    banner.className = 'view-only-top-banner';
+    banner.innerHTML = `👁 Viewing <strong>${username.replace(' (view-only)','')} </strong>'s profile — read-only mode`;
+    document.body.insertBefore(banner, document.getElementById('app-nav'));
+  }
+
   await updateNav(username);
 
   const hash = location.hash.slice(1) || 'dashboard';
   dispatch(hash);
+
+  // Auto-refresh wishlist prices on login (Section 3)
+  if (!viewOnly) {
+    _autoRefreshWishlistPrices(username, settings).catch(() => {});
+  }
+}
+
+async function _autoRefreshWishlistPrices(username, settings) {
+  const { getWishlist, putWishlistItem } = await import('./db.js');
+  const { fetchSteamPrice } = await import('./search.js');
+  const items = await getWishlist(username);
+  const stale = items.filter(i => {
+    if (!i.steam_appid) return false;
+    const updated = i.price_updated ? new Date(i.price_updated) : null;
+    if (!updated) return true;
+    return (Date.now() - updated.getTime()) > 3 * 3600 * 1000; // 3 hour refresh
+  });
+  for (const item of stale) {
+    try {
+      const price = await fetchSteamPrice(item.steam_appid);
+      if (price) {
+        item.price_current = `£${price.current}`;
+        item.on_sale       = price.on_sale;
+        item.price_updated = new Date().toISOString().slice(0,10);
+        await putWishlistItem(username, item);
+      }
+    } catch(e) {}
+  }
 }
 
 async function updateNav(username) {
   const profile = await getProfile(username);
-  document.getElementById('navUsername').textContent = username;
+  document.getElementById('navUsername').textContent = _isViewOnly ? username.replace(' (view-only)','') : username;
   const avatarEl = document.getElementById('navAvatar');
   if (profile?.pic) {
     avatarEl.innerHTML = `<img src="${h(profile.pic)}" class="nav-avatar-img">`;
@@ -189,7 +270,6 @@ function setActiveNav(view) {
   document.querySelectorAll('.nav-links button, .mobile-menu button').forEach(b => {
     b.classList.toggle('active', b.dataset.nav === view);
   });
-  // Close mobile menu on navigate
   const menu = document.getElementById('mobileMenu');
   if (menu) menu.style.display = 'none';
   const btn = document.getElementById('hamburgerBtn');
@@ -197,7 +277,7 @@ function setActiveNav(view) {
 }
 
 export function navigate(path, push = true) {
-  if (path === '__profiles__') { stopSync(); currentUser = null; showProfileSelector(); return; }
+  if (path === '__profiles__') { stopSync(); currentUser = null; _isViewOnly = false; showProfileSelector(); return; }
   const hash = '#' + path;
   if (push && location.hash !== hash) history.pushState(null, '', hash);
   dispatch(path);
@@ -206,15 +286,16 @@ export function navigate(path, push = true) {
 function dispatch(path) {
   if (!currentUser) { showProfileSelector(); return; }
   const exactMap = {
-    'dashboard': () => { setActiveNav('dashboard'); Views.renderDashboard(); },
-    'library':   () => { setActiveNav('library');   Views.renderLibrary(); },
-    'log':       () => { setActiveNav('log');        Views.renderLog(); },
-    'stats':     () => { setActiveNav('stats');      Views.renderStats(); },
-    'wishlist':  () => { setActiveNav('wishlist');   Views.renderWishlist(); },
-    'browse':    () => { setActiveNav('browse');     Views.renderBrowse(); },
-    'profile':   () => { setActiveNav('profile');    Views.renderProfile(); },
-    'settings':  () => { setActiveNav('settings');   Views.renderSettings(); },
-    'add':       () => { setActiveNav('library');    Views.renderGameForm(null); },
+    'dashboard':      () => { setActiveNav('dashboard');       Views.renderDashboard(); },
+    'library':        () => { setActiveNav('library');         Views.renderLibrary(); },
+    'log':            () => { setActiveNav('log');             Views.renderLog(); },
+    'session-logger': () => { setActiveNav('session-logger');  Views.renderSessionLogger(); },
+    'stats':          () => { setActiveNav('stats');           Views.renderStats(); },
+    'wishlist':       () => { setActiveNav('wishlist');        Views.renderWishlist(); },
+    'browse':         () => { setActiveNav('browse');          Views.renderBrowse(); },
+    'profile':        () => { setActiveNav('profile');         Views.renderProfile(); },
+    'settings':       () => { setActiveNav('settings');        Views.renderSettings(); },
+    'add':            () => { setActiveNav('library');         Views.renderGameForm(null); },
   };
   if (exactMap[path]) { exactMap[path](); return; }
 
@@ -231,6 +312,11 @@ document.addEventListener('click', e => {
   const el = e.target.closest('[data-nav]');
   if (!el) return;
   e.preventDefault();
+  // Block navigation to editing views in view-only mode
+  if (_isViewOnly) {
+    const blocked = ['add','settings'];
+    if (blocked.includes(el.dataset.nav)) { toast('Read-only mode — editing disabled', 'info'); return; }
+  }
   navigate(el.dataset.nav);
 });
 
@@ -239,7 +325,7 @@ window.addEventListener('popstate', () => {
   if (currentUser) dispatch(hash);
 });
 
-/* ── Hamburger menu wiring ────────────────────────── */
+/* ── Hamburger menu ───────────────────────────────── */
 document.addEventListener('click', e => {
   const btn = e.target.closest('#hamburgerBtn');
   if (!btn) return;
@@ -250,7 +336,6 @@ document.addEventListener('click', e => {
   btn.setAttribute('aria-expanded', String(!open));
 });
 
-// Close menu on outside click
 document.addEventListener('click', e => {
   if (!e.target.closest('#mobileMenu') && !e.target.closest('#hamburgerBtn')) {
     const menu = document.getElementById('mobileMenu');

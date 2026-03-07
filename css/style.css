@@ -45,7 +45,50 @@
   --text2:  #555560;
   --text3:  #9a9aa8;
   --shadow: 0 4px 24px rgba(0,0,0,0.10);
+  color-scheme: light;
 }
+
+/* Force light mode backgrounds on form elements (iOS/Android override) */
+[data-theme="light"] body {
+  background: var(--bg);
+  color: var(--text);
+  color-scheme: light;
+}
+[data-theme="light"] input,
+[data-theme="light"] textarea,
+[data-theme="light"] select {
+  background: #ffffff;
+  color: #1a1a1f;
+  border-color: var(--border2);
+  color-scheme: light;
+}
+[data-theme="light"] .input {
+  background: #ffffff !important;
+  color: #1a1a1f !important;
+}
+[data-theme="light"] .nav,
+[data-theme="light"] .sidebar {
+  background: #ffffff;
+  border-color: var(--border);
+}
+[data-theme="light"] .card,
+[data-theme="light"] .form-card,
+[data-theme="light"] .modal,
+[data-theme="light"] .autocomplete-dropdown {
+  background: #ffffff;
+  border-color: var(--border);
+}
+[data-theme="light"] .autocomplete-item:hover,
+[data-theme="light"] .autocomplete-item.selected {
+  background: var(--bg3);
+}
+[data-theme="light"] .game-hero {
+  background: linear-gradient(to bottom, #e8e7e3, #ffffff);
+}
+[data-theme="light"] .stat-tile { background: #ffffff; }
+[data-theme="light"] .filter-pill { background: var(--bg3); color: var(--text2); }
+[data-theme="light"] .filter-pill.active { background: var(--accent); color: #fff; }
+[data-theme="light"] .toast { color: #1a1a1f; }
 
 /* ── RESET ──────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -726,3 +769,293 @@ textarea.input { resize: vertical; min-height: 80px; }
 /* Log page — game search */
 .log-game[data-nav=""] { color: var(--text2); cursor: default; }
 
+
+/* ═══════════════════════════════════════════════════
+   SECTION 4 — New status: no-ending
+═══════════════════════════════════════════════════ */
+.badge-no-ending { background: rgba(0,188,212,.18); color: #00bcd4; }
+
+/* ═══════════════════════════════════════════════════
+   SECTION 5 — Custom poster upload
+═══════════════════════════════════════════════════ */
+.cover-upload-row { display: flex; gap: .5rem; align-items: center; }
+
+/* ═══════════════════════════════════════════════════
+   SECTION 6 — Session Logger
+═══════════════════════════════════════════════════ */
+.session-logger-active { border-color: var(--accent) !important; }
+.session-live-badge {
+  background: var(--red); color: #fff; font-size: .65rem; font-weight: 800;
+  text-transform: uppercase; letter-spacing: .08em; padding: .15rem .5rem;
+  border-radius: 4px; animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
+.session-logger-game-name { font-size: 1.4rem; font-weight: 800; margin-bottom: .5rem; }
+.session-logger-timer { font-family: var(--font-mono); font-size: 2.5rem; color: var(--accent); font-weight: 700; line-height: 1; margin-bottom: .4rem; }
+.session-logger-started { font-size: .82rem; color: var(--text3); }
+.session-quick-picks { display: flex; gap: .6rem; flex-wrap: wrap; }
+.session-quick-pick {
+  display: flex; align-items: center; gap: .5rem;
+  background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: var(--radius); padding: .4rem .75rem;
+  cursor: pointer; font-family: var(--font-body); font-size: .85rem;
+  font-weight: 600; color: var(--text); transition: all .15s;
+}
+.session-quick-pick:hover, .session-quick-pick.active { border-color: var(--accent); color: var(--accent); }
+.session-quick-cover { width: 28px; height: 38px; object-fit: cover; border-radius: 3px; }
+.session-selected-banner {
+  background: rgba(76,175,125,.12); border: 1px solid rgba(76,175,125,.3);
+  border-radius: var(--radius); padding: .6rem 1rem; font-size: .9rem;
+  color: var(--green);
+}
+
+/* ═══════════════════════════════════════════════════
+   SECTION 7 — View-only mode
+═══════════════════════════════════════════════════ */
+.view-only-top-banner {
+  position: sticky; top: 0; z-index: 101;
+  background: linear-gradient(90deg,#4a9eff22,#9b59b622);
+  border-bottom: 1px solid #4a9eff44;
+  padding: .5rem 1.5rem; font-size: .82rem; text-align: center;
+  color: var(--blue);
+}
+.view-only-banner {
+  background: rgba(74,158,255,.1); border: 1px solid rgba(74,158,255,.3);
+  border-radius: var(--radius); padding: .75rem 1rem; font-size: .88rem;
+  color: var(--blue); margin-bottom: 1rem;
+}
+
+/* ═══════════════════════════════════════════════════
+   Browse search bar
+═══════════════════════════════════════════════════ */
+.browse-search-bar {
+  display: flex; gap: .5rem; margin-bottom: .75rem;
+}
+.browse-search-bar .input { flex: 1; }
+.browse-card-meta { font-size: .72rem; color: var(--text3); margin-bottom: .25rem; line-height: 1.5; }
+.browse-card-ph {
+  width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+  background: var(--bg3); font-size: 1.5rem; font-weight: 800; color: var(--text3); font-family: var(--font-mono);
+}
+
+/* Robustness: broken image fallback */
+.cover-poster[src=""], .game-hero-cover[src=""],
+.cover-poster:not([src]), .game-hero-cover:not([src]) { display: none; }
+
+/* ── Missing wishlist CSS ─────────────────────────── */
+.wish-price-date { font-size: .68rem; color: var(--text3); line-height: 1.5; }
+.on-sale-card { border-color: rgba(76,175,125,.4) !important; }
+
+/* ── Section 8 — Robust image fallback ───────────── */
+img[src=""]       { display: none !important; }
+.game-card-poster, .recent-cover, .cover-poster,
+.fav-cover, .browse-card-img, .wish-card-cover { min-height: 10px; }
+
+/* ── Performance: reduce paint on hover ──────────── */
+.game-card, .browse-card, .fav-slot { will-change: transform; }
+
+/* ── Stat tiles wider on mobile ──────────────────── */
+@media (max-width: 480px) {
+  .stat-tiles { grid-template-columns: repeat(2, 1fr); }
+  .filter-bar { gap: .35rem; }
+  .filter-pill { font-size: .7rem; padding: .25rem .55rem .28rem; }
+}
+
+/* ═══════════════════════════════════════════════════
+   SECTIONS 1-8 ADDITIONS (Phase 2)
+═══════════════════════════════════════════════════ */
+
+/* ── Section 1: Profile pic nav update flash ─────── */
+.nav-avatar { transition: opacity .2s; }
+.nav-avatar.updating { opacity: .4; }
+
+/* ── Section 3: Wishlist auto price / loading ─────── */
+.wish-price-loading { color: var(--text3); font-size: .72rem; font-style: italic; }
+.wish-price-auto-badge {
+  display: inline-block; background: rgba(76,175,125,.15); color: var(--green);
+  font-size: .65rem; font-weight: 700; border-radius: 3px;
+  padding: .1rem .35rem; letter-spacing: .05em; text-transform: uppercase;
+}
+.wish-price-refresh-row {
+  display: flex; align-items: center; gap: .5rem; margin-top: .35rem; flex-wrap: wrap;
+}
+
+/* ── Section 6: Session Logger timer ────────────── */
+.session-elapsed {
+  font-family: var(--font-mono); font-size: 2.8rem; font-weight: 800;
+  color: var(--accent); line-height: 1; margin: .75rem 0;
+}
+.session-game-chip {
+  display: inline-flex; align-items: center; gap: .5rem;
+  background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 20px; padding: .35rem .85rem;
+  font-weight: 700; font-size: .9rem; margin-bottom: 1rem;
+}
+.session-game-chip img {
+  width: 22px; height: 30px; border-radius: 3px; object-fit: cover;
+}
+
+/* ── Section 7: View-only loader ─────────────────── */
+.view-only-import-card {
+  background: var(--bg2); border: 2px dashed var(--border2);
+  border-radius: var(--radius-lg); padding: 2rem; text-align: center;
+  cursor: pointer; transition: border-color .2s;
+}
+.view-only-import-card:hover { border-color: var(--blue); }
+
+/* ── Browse improvements: IGDB badge ─────────────── */
+.browse-source-badge {
+  display: inline-block; font-size: .65rem; font-weight: 700; padding: .1rem .35rem;
+  border-radius: 3px; letter-spacing: .04em; text-transform: uppercase;
+  background: rgba(74,158,255,.15); color: var(--blue); margin-left: .35rem;
+}
+
+/* ── Section 8: Placeholder improvements ─────────── */
+.cover-placeholder-box {
+  width: 100%; height: 100%; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--bg3), var(--bg2));
+  color: var(--text3); font-size: .7rem; font-weight: 700; gap: .4rem;
+}
+.cover-placeholder-box .ph-icon { font-size: 1.8rem; }
+
+/* ── Page transitions ────────────────────────────── */
+#app { animation: pageFade .18s ease; }
+@keyframes pageFade { from { opacity:.7; transform: translateY(4px); } to { opacity:1; transform: none; } }
+
+/* ── Wishlist auto-refresh indicator ─────────────── */
+.price-spinner {
+  display: inline-block; width: 10px; height: 10px;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle;
+}
+
+/* ── Browse card: cover-style for IGDB ───────────── */
+.browse-card-img-wrap.portrait { aspect-ratio: 3/4; }
+.browse-card-img-wrap.portrait .browse-card-img { object-position: center top; }
+
+/* ── View-only profile screen option ─────────────── */
+.profile-viewonly-option {
+  margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--border);
+  text-align: center;
+}
+.profile-viewonly-option p {
+  font-size: .8rem; color: var(--text3); margin-bottom: .75rem;
+}
+
+/* ── Complete type group — wrap on mobile ─────────── */
+@media (max-width: 540px) {
+  .complete-type-group { flex-direction: column; gap: .5rem; }
+}
+
+/* ── Autocomplete: prevent closing flicker ───────── */
+.autocomplete-dropdown { transition: none !important; }
+
+/* ── Search source info ──────────────────────────── */
+.search-source-info {
+  font-size: .72rem; color: var(--text3); margin-top: .25rem;
+  padding: .15rem .5rem; background: var(--bg3); border-radius: 4px;
+  display: inline-block;
+}
+
+/* ═══════════════════════════════════════════════════
+   SECTIONS 1–12 NEW STYLES
+═══════════════════════════════════════════════════ */
+
+/* ── Section 6: Star rating widget ──────────────── */
+.star-rating-widget {
+  display: flex; align-items: center; gap: .15rem; flex-wrap: wrap;
+}
+.star-btn {
+  background: none; border: none; cursor: pointer; padding: .1rem .05rem;
+  font-size: 1.5rem; line-height: 1; color: var(--text3);
+  transition: color .1s, transform .1s;
+}
+.star-btn.star-active { color: var(--yellow, #f0b840); }
+.star-btn:hover { color: var(--accent); transform: scale(1.15); }
+.star-value-label {
+  font-size: .78rem; color: var(--text3); margin-left: .35rem;
+  min-width: 2.2rem;
+}
+.rating-display { display: inline-flex; align-items: center; gap: .25rem; }
+
+/* ── Section 3: Platform checkboxes ─────────────── */
+.platform-checkboxes {
+  display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .35rem;
+}
+.platform-checkbox-label { cursor: pointer; }
+.platform-checkbox-label input { display: none; }
+.platform-pill {
+  display: inline-block; padding: .3rem .75rem; border-radius: 999px;
+  border: 1.5px solid var(--border2); font-size: .82rem; font-weight: 500;
+  color: var(--text2); transition: all .15s;
+}
+.platform-checkbox-label input:checked + .platform-pill {
+  border-color: var(--accent); background: rgba(var(--accent-rgb, 232,103,60), .12);
+  color: var(--accent);
+}
+.platform-checkbox-label:hover .platform-pill { border-color: var(--accent); }
+
+/* ── Section 4: Crop modal ───────────────────────── */
+.crop-modal-overlay { z-index: 400; }
+.crop-modal { max-width: 520px; width: 95vw; }
+.crop-modal.modal-lg { max-width: 600px; }
+.crop-container { display: flex; flex-direction: column; gap: 1rem; }
+.crop-frame {
+  position: relative; width: 100%; aspect-ratio: 1;
+  background: var(--bg1); overflow: hidden; border-radius: var(--radius);
+  user-select: none; cursor: grab;
+}
+.crop-frame:active { cursor: grabbing; }
+.crop-frame img {
+  position: absolute; top: 0; left: 0;
+  max-width: none; max-height: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.crop-circle {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 75%; aspect-ratio: 1;
+  border: 2.5px solid rgba(255,255,255,.9);
+  border-radius: 50%;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.55);
+  pointer-events: none;
+}
+.crop-controls { display: flex; align-items: center; gap: .75rem; }
+.crop-label { font-size: .82rem; color: var(--text2); min-width: 2.5rem; }
+.crop-slider { flex: 1; }
+
+/* ── Section 2: Review blockquote ───────────────── */
+.game-review-block {
+  border-left: 3px solid var(--accent); padding: .6rem 1rem;
+  margin: .75rem 0 0; color: var(--text2); font-size: .9rem;
+  line-height: 1.7; font-style: italic; background: var(--bg3);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+/* ── Section 10: Debug tools ─────────────────────── */
+.debug-tool-row {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap;
+}
+.debug-tool-row > div { flex: 1; min-width: 0; }
+.debug-tool-row > div strong { font-size: .9rem; display: block; margin-bottom: .2rem; }
+.debug-tool-row > button { flex-shrink: 0; align-self: flex-start; }
+
+/* ── Section 10: Settings cards ─────────────────── */
+.settings-layout .form-card { margin-bottom: 1.5rem; }
+
+/* ── Duration hint under playtime input ─────────── */
+.duration-hint {
+  display: block; font-size: .76rem; color: var(--accent);
+  margin-top: .2rem; font-weight: 600;
+}
+
+/* ── Label hint ──────────────────────────────────── */
+.label-hint {
+  font-size: .76rem; color: var(--text3); display: block; margin-top: .2rem;
+}
+
+/* ── Section 7: Hours field subtext ─────────────── */
+.hours-subtext { font-size: .72rem; color: var(--text3); margin-top: .2rem; }

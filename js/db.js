@@ -1,6 +1,6 @@
 /* js/db.js — IndexedDB abstraction, namespaced per username */
 
-const DB_NAME    = 'GameTrackerV4';
+const DB_NAME    = 'GameTrackerV5';
 const DB_VERSION = 1;
 
 let _db = null;
@@ -18,6 +18,10 @@ export function openDB() {
       if (!db.objectStoreNames.contains('game_cache')) {
         const cs = db.createObjectStore('game_cache', { keyPath: 'cacheKey' });
         cs.createIndex('fetched', 'fetched');
+      }
+      if (!db.objectStoreNames.contains('active_sessions')) {
+        // For live session logger — persists across refreshes
+        db.createObjectStore('active_sessions', { keyPath: 'id' });
       }
       for (const name of ['games','sessions','wishlist','favorites','settings','sync_log']) {
         if (!db.objectStoreNames.contains(name)) {
@@ -56,10 +60,14 @@ export async function touchProfile(username) {
   const p = await wrap(s.get(username));
   if (p) { p.lastLogin = new Date().toISOString(); await wrap(s.put(p)); }
 }
-export async function updateProfilePic(username, pic) {
+export async function updateProfilePic(username, pic, pic_ts) {
   const s = store('profiles','readwrite');
   const p = await wrap(s.get(username));
-  if (p) { p.pic = pic; await wrap(s.put(p)); }
+  if (p) {
+    p.pic    = pic;
+    p.pic_ts = pic_ts || new Date().toISOString();
+    await wrap(s.put(p));
+  }
 }
 export async function deleteProfile(username) {
   for (const name of ['games','sessions','wishlist','favorites','settings','sync_log']) {
@@ -138,7 +146,10 @@ export async function deleteWishlistItem(username, id) {
 /* ── FAVORITES ────────────────────────────────────── */
 export async function getFavorites(username) { return byUser('favorites', username); }
 export async function setFavorite(username, slot, gameId) {
-  return wrap(store('favorites','readwrite').put({ username, id: String(slot), slot, game_id: gameId || null }));
+  return wrap(store('favorites','readwrite').put({
+    username, id: String(slot), slot, game_id: gameId || null,
+    updatedAt: new Date().toISOString(),
+  }));
 }
 
 /* ── GAME METADATA CACHE ──────────────────────────── */
@@ -155,14 +166,33 @@ export async function bustCache(key) {
   try { await wrap(store('game_cache','readwrite').delete(key)); } catch(e) {}
 }
 
+/* ── ACTIVE SESSION (live tracker) ───────────────── */
+export async function saveActiveSession(session) {
+  return wrap(store('active_sessions','readwrite').put(session));
+}
+export async function getActiveSession(id) {
+  return wrap(store('active_sessions').get(id));
+}
+export async function getAllActiveSessions() {
+  return wrap(store('active_sessions').getAll());
+}
+export async function deleteActiveSession(id) {
+  try { return wrap(store('active_sessions','readwrite').delete(id)); } catch(e) {}
+}
+
 /* ── EXPORT / IMPORT ──────────────────────────────── */
-export async function exportProfile(username) {
+export async function exportProfile(username, viewOnly = false) {
   const [games, sessions, wishlist, favorites, settings] = await Promise.all([
     getGames(username), getSessions(username), getWishlist(username),
     getFavorites(username), getAllSettings(username),
   ]);
   const profile = await getProfile(username);
-  return { version:4, exportedAt: new Date().toISOString(), username, pic: profile?.pic||null, games, sessions, wishlist, favorites, settings };
+  return {
+    version: 5, exportedAt: new Date().toISOString(),
+    username, pic: profile?.pic||null,
+    viewOnly: viewOnly || false,
+    games, sessions, wishlist, favorites, settings
+  };
 }
 export async function importProfile(data) {
   const { username, games=[], sessions=[], wishlist=[], favorites=[], settings={}, pic=null } = data;

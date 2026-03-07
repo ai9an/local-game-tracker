@@ -1,9 +1,10 @@
 /* js/sync.js
  * Sync via:
  *   1. BroadcastChannel — instant cross-tab (same device, always on)
- *   2. Cloudflare Worker — cross-device, works on GitHub Pages (optional)
+ *   2. Cloudflare Worker — cross-device (optional, configured in Settings)
  *
- * Worker URL is saved in Settings and loaded on login.
+ * Section 11 fix: favorites and profile pictures now included in payload
+ * and properly merged with last-write-wins logic.
  */
 
 import * as DB from './db.js';
@@ -12,7 +13,7 @@ let _user      = null;
 let _channel   = null;
 let _timer     = null;
 let _enabled   = false;
-let _workerUrl = null;  // https://your-worker.workers.dev
+let _workerUrl = null;
 
 const POLL_MS = 30_000;
 
@@ -38,24 +39,24 @@ export function getSyncWorkerUrl() { return _workerUrl; }
 
 /* ── Call after every DB write ────────────────────── */
 export async function onDataChanged() {
-  if (!_enabled) return;
+  if (!_user) return;
   const payload = await _buildPayload();
   if (_channel) _channel.postMessage({ user: _user, payload });
-  _pushNow().catch(() => {});
+  if (_enabled && _workerUrl) _pushNow().catch(() => {});
 }
 
-/* ── BroadcastChannel (cross-tab, instant) ────────── */
+/* ── BroadcastChannel (cross-tab) ─────────────────── */
 function _startBroadcast() {
   if (_channel) _channel.close();
-  _channel = new BroadcastChannel('gt_sync_v3');
+  _channel = new BroadcastChannel('gt_sync_v4');
   _channel.onmessage = async e => {
-    if (!_enabled || e.data?.user !== _user) return;
+    if (e.data?.user !== _user) return;
     const changed = await _mergePayload(e.data.payload);
     if (changed) window.dispatchEvent(new CustomEvent('gt:synced'));
   };
 }
 
-/* ── Cloudflare Worker polling (cross-device) ─────── */
+/* ── Cloudflare Worker polling ─────────────────────── */
 function _startPoll() {
   if (_timer) clearInterval(_timer);
   _pollOnce();
@@ -86,29 +87,40 @@ async function _pushNow() {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ user: _user, payload: await _buildPayload() }),
-      signal:  AbortSignal.timeout(8000),
+      signal:  AbortSignal.timeout(10000),
     });
   } catch(e) {}
 }
 
-/* ── Payload builder ──────────────────────────────── */
+/* ── Payload builder — includes favorites + pic ────── */
 async function _buildPayload() {
-  const [games, sessions, wishlist, settings, profile] = await Promise.all([
-    DB.getGames(_user), DB.getSessions(_user), DB.getWishlist(_user),
-    DB.getAllSettings(_user), DB.getProfile(_user),
+  const [games, sessions, wishlist, favorites, settings, profile] = await Promise.all([
+    DB.getGames(_user),
+    DB.getSessions(_user),
+    DB.getWishlist(_user),
+    DB.getFavorites(_user),      // Section 11: favorites now synced
+    DB.getAllSettings(_user),
+    DB.getProfile(_user),
   ]);
   return {
-    games, sessions, wishlist, settings,
-    pic: profile?.pic || null,
-    ts:  new Date().toISOString(),
+    v: 2,                        // payload version so old clients degrade gracefully
+    games,
+    sessions,
+    wishlist,
+    favorites,                   // Section 11
+    settings,
+    pic:       profile?.pic  || null,
+    pic_ts:    profile?.pic_ts || null,   // timestamp so newer pic wins
+    ts:        new Date().toISOString(),
   };
 }
 
-/* ── Merge (last-write-wins on updatedAt) ─────────── */
+/* ── Merge (last-write-wins on updatedAt / ts) ─────── */
 async function _mergePayload(remote) {
   if (!remote) return false;
   let changed = false;
 
+  // Games
   for (const rg of (remote.games || [])) {
     const local = await DB.getGame(_user, rg.id);
     if (!local || new Date(rg.updatedAt || 0) > new Date(local.updatedAt || 0)) {
@@ -116,28 +128,52 @@ async function _mergePayload(remote) {
       changed = true;
     }
   }
+
+  // Sessions (add missing)
+  const localSessions = await DB.getSessions(_user);
+  const localSessionIds = new Set(localSessions.map(s => s.id));
   for (const rs of (remote.sessions || [])) {
-    const all = await DB.getSessions(_user);
-    if (!all.find(s => s.id === rs.id)) {
+    if (!localSessionIds.has(rs.id)) {
       await DB.putSession(_user, { ...rs, username: _user });
       changed = true;
     }
   }
+
+  // Wishlist (add missing)
+  const localWish = await DB.getWishlist(_user);
+  const localWishIds = new Set(localWish.map(w => w.id));
   for (const rw of (remote.wishlist || [])) {
-    const all = await DB.getWishlist(_user);
-    if (!all.find(w => w.id === rw.id)) {
+    if (!localWishIds.has(rw.id)) {
       await DB.putWishlistItem(_user, { ...rw, username: _user });
       changed = true;
     }
   }
+
+  // Section 11: Favorites — merge by slot, remote wins if more recent
+  for (const rf of (remote.favorites || [])) {
+    const localFavs = await DB.getFavorites(_user);
+    const lf = localFavs.find(f => String(f.slot) === String(rf.slot));
+    if (!lf || new Date(rf.updatedAt || 0) > new Date(lf.updatedAt || 0)) {
+      await DB.setFavorite(_user, rf.slot, rf.game_id);
+      changed = true;
+    }
+  }
+
+  // Section 11: Profile picture — use pic_ts to decide which is newer
   if (remote.pic) {
     const p = await DB.getProfile(_user);
-    if (!p?.pic) { await DB.updateProfilePic(_user, remote.pic); changed = true; }
+    const remoteTs = new Date(remote.pic_ts || remote.ts || 0);
+    const localTs  = new Date(p?.pic_ts || 0);
+    if (!p?.pic || remoteTs > localTs) {
+      await DB.updateProfilePic(_user, remote.pic, remote.pic_ts);
+      changed = true;
+    }
   }
+
   return changed;
 }
 
-/* ── Discover profiles on worker (for login screen) ── */
+/* ── Discover profiles on worker ──────────────────── */
 export async function discoverRemoteProfiles(workerUrl) {
   if (!workerUrl) return [];
   try {

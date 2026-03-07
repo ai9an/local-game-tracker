@@ -14,11 +14,18 @@ export function fmtHours(v) {
   if (v < 1) return `${Math.round(v*60)}m`;
   return `${v.toFixed(1)}h`;
 }
+
+/* ── Section 6: Letterboxd-style star rating display ── */
 export function fmtStars(r) {
-  if (r == null) return '—';
+  if (r == null || r === '') return '—';
   r = parseFloat(r);
-  return '★'.repeat(Math.floor(r)) + (r%1>=.5?'½':'') + '☆'.repeat(5-Math.floor(r)-(r%1>=.5?1:0));
+  if (isNaN(r)) return '—';
+  const full = Math.floor(r);
+  const half = (r % 1) >= 0.5 ? 1 : 0;
+  const empty = 5 - full - half;
+  return '★'.repeat(full) + (half ? '½' : '') + '☆'.repeat(empty);
 }
+
 export function fmtDate(d) {
   if (!d) return '—';
   try { return new Date(d.slice(0,10)+'T12:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}); }
@@ -29,12 +36,28 @@ export function fmtPrice(p) {
   return typeof p === 'number' ? `£${p.toFixed(2)}` : String(p);
 }
 export function todayISO() { return new Date().toISOString().slice(0,10); }
+export function nowTimeHHMM() {
+  const n = new Date();
+  return `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`;
+}
 export function parseDuration(start, end) {
   const [sh,sm] = start.split(':').map(Number);
   const [eh,em] = end.split(':').map(Number);
   let m = (eh*60+em)-(sh*60+sm);
   if (m <= 0) m += 1440;
   return +(m/60).toFixed(4);
+}
+export function parsePlaytimeInput(str) {
+  /* Parses strings like "2h 30m", "2.5h", "150m", "2h", "30m" → hours as float */
+  if (!str || !str.trim()) return null;
+  str = str.trim().toLowerCase();
+  const hm = str.match(/^(\d+(?:\.\d+)?)\s*h(?:\s*(\d+)\s*m?)?$/);
+  if (hm) return parseFloat(hm[1]) + (hm[2] ? parseInt(hm[2])/60 : 0);
+  const mo = str.match(/^(\d+(?:\.\d+)?)\s*m$/);
+  if (mo) return parseFloat(mo[1]) / 60;
+  const num = parseFloat(str);
+  if (!isNaN(num)) return num;
+  return null;
 }
 
 /* ── Toast ─────────────────────────────────────────── */
@@ -78,7 +101,7 @@ export function confirm(msg) {
       <p style="color:var(--text2);font-size:.9rem;line-height:1.6;margin-bottom:.5rem">${h(msg)}</p>
       <div class="modal-actions">
         <button class="btn-outline" id="_cc">Cancel</button>
-        <button class="btn-danger"  id="_co">Delete</button>
+        <button class="btn-danger"  id="_co">Confirm</button>
       </div></div>`;
     document.body.appendChild(ov);
     ov.style.display='flex';
@@ -95,14 +118,162 @@ export function coverImgHtml(game, cls='') {
   return `<div class="cover-placeholder">${label}</div>`;
 }
 
+/* ── Section 6: Interactive star rating widget ─────── */
+export function renderStarRating(containerId, initialValue, onChange) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  let current = parseFloat(initialValue) || 0;
+  // last full star clicked — used for half-star toggle
+  let lastClicked = 0;
+
+  function draw() {
+    container.innerHTML = '';
+    for (let i = 1; i <= 5; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'star-btn';
+      btn.dataset.star = i;
+      if (current >= i)        btn.textContent = '★';
+      else if (current >= i-0.5) btn.textContent = '½';
+      else                      btn.textContent = '☆';
+      btn.classList.toggle('star-active', current >= i - 0.5);
+      btn.addEventListener('click', () => {
+        if (lastClicked === i && current === i) {
+          // Same full star clicked again → toggle to half
+          current = i - 0.5;
+        } else if (lastClicked === i && current === i - 0.5) {
+          // Half star clicked again → clear to 0
+          current = 0;
+          lastClicked = 0;
+        } else {
+          current = i;
+          lastClicked = i;
+        }
+        draw();
+        if (onChange) onChange(current);
+      });
+      container.appendChild(btn);
+    }
+    // Show numeric label
+    const lbl = document.createElement('span');
+    lbl.className = 'star-value-label';
+    lbl.textContent = current > 0 ? `${current}★` : '';
+    container.appendChild(lbl);
+  }
+  draw();
+  return {
+    getValue: () => current,
+    setValue: v => { current = parseFloat(v) || 0; lastClicked = Math.floor(current); draw(); }
+  };
+}
+
+/* ── Section 4: Image cropper ─────────────────────── */
+export function openCropModal(file, onCropped) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const src = ev.target.result;
+    const ov  = document.createElement('div');
+    ov.className = 'modal-overlay crop-modal-overlay';
+    ov.style.display = 'flex';
+    ov.innerHTML = `
+      <div class="modal modal-lg crop-modal">
+        <div class="modal-head">
+          <h3>Crop Profile Picture</h3>
+          <button class="modal-close" id="closeCropModal">×</button>
+        </div>
+        <div class="crop-container">
+          <div class="crop-frame" id="cropFrame">
+            <img id="cropImg" src="${src}" draggable="false">
+            <div class="crop-circle" id="cropCircle"></div>
+          </div>
+          <div class="crop-controls">
+            <label class="crop-label">Zoom</label>
+            <input type="range" id="cropZoom" min="1" max="3" step="0.05" value="1" class="crop-slider">
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-outline" id="cancelCrop">Cancel</button>
+          <button class="btn-primary" id="confirmCrop">Use Photo</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+
+    const img    = ov.querySelector('#cropImg');
+    const circle = ov.querySelector('#cropCircle');
+    const frame  = ov.querySelector('#cropFrame');
+    const zoom   = ov.querySelector('#cropZoom');
+
+    let scale = 1, ox = 0, oy = 0, dragging = false, startX = 0, startY = 0, imgX = 0, imgY = 0;
+
+    function clamp() {
+      const fw = frame.offsetWidth, fh = frame.offsetHeight;
+      const iw = img.naturalWidth * scale, ih = img.naturalHeight * scale;
+      const minX = Math.min(0, fw - iw), minY = Math.min(0, fh - ih);
+      ox = Math.max(minX, Math.min(0, ox));
+      oy = Math.max(minY, Math.min(0, oy));
+    }
+    function applyTransform() {
+      img.style.transform = `translate(${ox}px, ${oy}px) scale(${scale})`;
+      img.style.transformOrigin = '0 0';
+    }
+
+    zoom.addEventListener('input', () => {
+      scale = parseFloat(zoom.value);
+      clamp(); applyTransform();
+    });
+
+    frame.addEventListener('mousedown', e => { dragging=true; startX=e.clientX-ox; startY=e.clientY-oy; e.preventDefault(); });
+    document.addEventListener('mousemove', e => { if (!dragging) return; ox=e.clientX-startX; oy=e.clientY-startY; clamp(); applyTransform(); });
+    document.addEventListener('mouseup', () => { dragging=false; });
+    // Touch
+    frame.addEventListener('touchstart', e => { dragging=true; startX=e.touches[0].clientX-ox; startY=e.touches[0].clientY-oy; }, {passive:true});
+    frame.addEventListener('touchmove',  e => { if (!dragging) return; ox=e.touches[0].clientX-startX; oy=e.touches[0].clientY-startY; clamp(); applyTransform(); }, {passive:true});
+    frame.addEventListener('touchend',   () => { dragging=false; });
+
+    ov.querySelector('#closeCropModal').onclick = () => { ov.remove(); };
+    ov.querySelector('#cancelCrop').onclick     = () => { ov.remove(); };
+
+    ov.querySelector('#confirmCrop').onclick = () => {
+      // Draw cropped circle to canvas
+      const size   = 256; // output px
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = size;
+      const ctx    = canvas.getContext('2d');
+
+      // Clip to circle
+      ctx.beginPath();
+      ctx.arc(size/2, size/2, size/2, 0, Math.PI*2);
+      ctx.clip();
+
+      // Figure out what portion of the image is in the crop circle
+      const fw = frame.offsetWidth, fh = frame.offsetHeight;
+      // Circle sits centred in frame
+      const cx = fw/2 - circle.offsetWidth/2 - ox;
+      const cy = fh/2 - circle.offsetHeight/2 - oy;
+      const cw = circle.offsetWidth  / scale;
+      const ch = circle.offsetHeight / scale;
+      // Source coords on natural image
+      const sx = cx / scale * (img.naturalWidth  / (img.naturalWidth));
+      const sy = cy / scale * (img.naturalHeight / (img.naturalHeight));
+
+      ctx.drawImage(img, sx, sy, cw, ch, 0, 0, size, size);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      ov.remove();
+      onCropped(dataUrl);
+    };
+  };
+  reader.readAsDataURL(file);
+}
+
 /* ── Autocomplete widget ────────────────────────────── */
 export class Autocomplete {
   constructor({ input, dropdown, status, onSearch, onSelect }) {
     this.input    = input;
     this.dropdown = dropdown;
     this.status   = status;
-    this.onSearch = onSearch;   // async fn(query) → { results:[] }
-    this.onSelect = onSelect;   // fn(item)
+    this.onSearch = onSearch;
+    this.onSelect = onSelect;
     this.items    = [];
     this.active   = -1;
     this.timer    = null;
@@ -122,9 +293,11 @@ export class Autocomplete {
       else if (e.key==='Enter' && this.active>=0) { e.preventDefault(); this._pick(this.active); }
       else if (e.key==='Escape') this.hide();
     });
-    document.addEventListener('click', e => {
-      if (!this.input.contains(e.target) && !this.dropdown.contains(e.target)) this.hide();
-    });
+    this._outsideHandler = e => {
+      if (this.input.contains(e.target) || this.dropdown.contains(e.target)) return;
+      this.hide();
+    };
+    document.addEventListener('mousedown', this._outsideHandler);
   }
   async _search(q) {
     try {
@@ -149,10 +322,10 @@ export class Autocomplete {
     this.items.forEach((item, i) => {
       const div = document.createElement('div');
       div.className = 'autocomplete-item';
-      const src   = item.source||'steam';
-      const bdg   = src==='igdb' ? '<span class="source-badge source-igdb">IGDB</span>' : '<span class="source-badge source-steam">Steam</span>';
-      const meta  = [item.release_year, item.genres].filter(Boolean).join(' · ');
-      const img   = item.cover_url
+      const src  = item.source||'steam';
+      const bdg  = src==='igdb' ? '<span class="source-badge source-igdb">IGDB</span>' : '<span class="source-badge source-steam">Steam</span>';
+      const meta = [item.release_year, item.genres].filter(Boolean).join(' · ');
+      const img  = item.cover_url
         ? `<img src="${h(item.cover_url)}" alt="" loading="lazy" onerror="this.style.display='none'">`
         : `<div class="ac-ph">${(item.title||'?').slice(0,2).toUpperCase()}</div>`;
       div.innerHTML = `<div class="ac-cover">${img}</div><div class="ac-info"><span class="ac-title">${h(item.title)}</span><span class="ac-meta">${h(meta)}</span></div>${bdg}`;
@@ -160,7 +333,6 @@ export class Autocomplete {
       div.addEventListener('mouseover', () => this._setActive(i));
       this.dropdown.appendChild(div);
     });
-    // KEY FIX: proper height + scroll
     this.dropdown.style.cssText += 'display:block;max-height:320px;overflow-y:auto;overflow-x:hidden';
     this.dropdown.scrollTop = 0;
   }
@@ -177,6 +349,7 @@ export class Autocomplete {
   }
   _pick(i) { this.onSelect(this.items[i]); this.hide(); }
   hide()    { this.dropdown.style.display='none'; this.items=[]; this.active=-1; }
+  destroy() { if (this._outsideHandler) document.removeEventListener('mousedown', this._outsideHandler); }
 }
 
 /* ── Duration calc ─────────────────────────────────── */
@@ -193,7 +366,8 @@ export function attachDurationCalc(form) {
     const h2 = Math.floor(d), m = Math.round((d-h2)*60);
     hint.textContent = m ? `= ${h2}h ${m}m` : `= ${h2}h`;
   }
-  st.addEventListener('change', calc); et.addEventListener('change', calc); st.addEventListener('input', calc); et.addEventListener('input', calc);
+  st.addEventListener('change', calc); et.addEventListener('change', calc);
+  st.addEventListener('input', calc);  et.addEventListener('input', calc);
 }
 
 /* ── Cover preview ─────────────────────────────────── */
@@ -206,4 +380,30 @@ export function setupCoverPreview(urlInput, previewContainer) {
   }
   urlInput.addEventListener('input', update);
   update();
+}
+
+/* ── Platform checkboxes (Section 3) ────────────────── */
+export const PLATFORM_OPTIONS = ['PC','PlayStation','Xbox','Switch'];
+
+export function renderPlatformCheckboxes(containerId, currentValue) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  // currentValue can be a comma-separated string or array
+  const selected = new Set(
+    Array.isArray(currentValue)
+      ? currentValue
+      : (currentValue||'').split(',').map(s=>s.trim()).filter(Boolean)
+  );
+  el.innerHTML = PLATFORM_OPTIONS.map(p => `
+    <label class="platform-checkbox-label">
+      <input type="checkbox" name="platform_cb" value="${p}" ${selected.has(p)?'checked':''}>
+      <span class="platform-pill">${p}</span>
+    </label>`).join('');
+}
+
+export function getSelectedPlatforms(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return '';
+  return [...el.querySelectorAll('input[name="platform_cb"]:checked')]
+    .map(cb => cb.value).join(', ');
 }

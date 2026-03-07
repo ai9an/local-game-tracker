@@ -1,34 +1,54 @@
 /* js/views.js — All page renderers */
 
 import * as DB from './db.js';
-import { searchGames, getGameDetail, testIGDB, fetchSteamPrice, fetchTrending } from './search.js';
-import { h, fmtHours, fmtStars, fmtDate, fmtPrice, todayISO, parseDuration,
+import { searchGames, searchGamesSteamFirst, getGameDetail, fetchDescriptionForGame, testIGDB, fetchSteamPrice, fetchTrending, searchBrowse } from './search.js';
+import { h, fmtHours, fmtStars, fmtDate, fmtPrice, todayISO, nowTimeHHMM, parseDuration, parsePlaytimeInput,
          toast, confirm, openModal, closeModal, closeAllModals,
-         Autocomplete, attachDurationCalc, setupCoverPreview } from './ui.js';
+         Autocomplete, attachDurationCalc, setupCoverPreview,
+         renderStarRating, openCropModal, renderPlatformCheckboxes, getSelectedPlatforms,
+         PLATFORM_OPTIONS } from './ui.js';
 import { onDataChanged } from './sync.js';
 
-let _user = null;
-let _nav  = null;
+let _user    = null;
+let _nav     = null;
+let _viewOnly = false; // Section 7 — read-only mode
 
-export function init(username, navigateFn) {
-  _user = username;
-  _nav  = navigateFn;
+export function init(username, navigateFn, viewOnly = false) {
+  _user     = username;
+  _nav      = navigateFn;
+  _viewOnly = viewOnly;
 }
 
 function main() { return document.getElementById('app'); }
 
 /* ── Status helpers ───────────────────────────────── */
-const ALL_STATUSES = ['playing','completed','100%','backlog','paused','dropped'];
+// Section 4: Updated statuses with renamed 'completed' and new 'no-ending'
+const ALL_STATUSES = ['playing','completed','no-ending','100%','backlog','paused','dropped'];
+
+const STATUS_LABELS = {
+  'playing':   'Playing',
+  'completed': 'Completed your main goal',
+  'no-ending': 'Game has no ending',
+  '100%':      '💯 100% Completed',
+  'backlog':   'Backlog',
+  'paused':    'Paused',
+  'dropped':   'Dropped',
+};
+
+function statusLabel(status) {
+  return STATUS_LABELS[status] || status;
+}
 
 function statusBadge(status) {
-  const cls = status === '100%' ? 'badge-100' : `badge-${status}`;
-  const lbl = status === '100%' ? '💯 100%' : status;
+  const cls = status === '100%' ? 'badge-100' : status === 'no-ending' ? 'badge-no-ending' : `badge-${status}`;
+  const lbl = STATUS_LABELS[status] || status;
   return `<span class="badge ${cls}">${lbl}</span>`;
 }
 
 function completionIcon(status) {
   if (status === '100%')      return '💯';
   if (status === 'completed') return '✅';
+  if (status === 'no-ending') return '♾️';
   return '';
 }
 
@@ -134,7 +154,7 @@ export async function renderLibrary() {
       <button class="btn-primary" data-nav="add">+ Add Game</button>
     </div>
     <div class="filter-bar">
-      ${['all',...ALL_STATUSES].map(s=>`<button class="filter-pill${s==='all'?' active':''}" data-status="${s}">${s==='all'?'All':s==='100%'?'💯 100%':s.charAt(0).toUpperCase()+s.slice(1)}</button>`).join('')}
+      ${['all',...ALL_STATUSES].map(s=>`<button class="filter-pill${s==='all'?' active':''}" data-status="${s}">${s==='all'?'All':statusLabel(s)}</button>`).join('')}
       <input type="search" class="input filter-search" id="libSearch" placeholder="Search…">
       <select class="input" id="libSort" style="max-width:150px">
         <option value="title">A–Z</option>
@@ -146,7 +166,11 @@ export async function renderLibrary() {
     </div>
     <div class="game-grid" id="gameGrid"></div>`;
 
-  let filter='all', sortBy='title', query='';
+  let filter='all', sortBy=localStorage.getItem(`gt_lib_sort_${_user}`)||'title', query='';
+
+  // Restore saved sort
+  const sortSelect = document.getElementById('libSort');
+  if (sortSelect) sortSelect.value = sortBy;
 
   function sortGames(arr) {
     return [...arr].sort((a,b)=>{
@@ -168,21 +192,27 @@ export async function renderLibrary() {
       grid.innerHTML=`<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">🔍</div><h3>No games found</h3><p>Try a different filter.</p></div>`;
       return;
     }
-    grid.innerHTML = list.map(g => `
+    grid.innerHTML = list.map(g => {
+      const titleAbbr = h((g.title||'??').slice(0,2).toUpperCase());
+      const coverHtml = g.cover_url
+        ? `<img src="${h(g.cover_url)}" class="game-card-poster" loading="lazy"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+           <div class="game-card-ph" style="display:none">${titleAbbr}</div>`
+        : `<div class="game-card-ph">${titleAbbr}</div>`;
+      return `
       <div class="game-card" data-nav="game/${g.id}">
-        ${g.cover_url
-          ? `<img src="${h(g.cover_url)}" class="game-card-poster" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="game-card-ph" style="display:none">${h((g.title||'').slice(0,2).toUpperCase())}</div>`
-          : `<div class="game-card-ph">${h((g.title||'').slice(0,2).toUpperCase())}</div>`}
+        ${coverHtml}
         <div class="game-card-badges">
           ${statusBadge(g.status)}
           ${g.via_subscription?'<span class="sub-badge">📦 Sub</span>':''}
         </div>
         ${g.status==='100%'?'<div class="card-100-badge">💯</div>':''}
         <div class="game-card-info">
-          <div class="game-card-title">${h(g.title)}</div>
+          <div class="game-card-title">${h(g.title||'Unknown')}</div>
           <div class="game-card-meta">${fmtHours(g.total_hours)}${g.rating?` · ${fmtStars(g.rating)}`:''}</div>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }
 
   document.querySelectorAll('.filter-pill').forEach(btn => {
@@ -194,7 +224,11 @@ export async function renderLibrary() {
     });
   });
   document.getElementById('libSearch').addEventListener('input', e => { query=e.target.value; render(); });
-  document.getElementById('libSort').addEventListener('change', e => { sortBy=e.target.value; render(); });
+  document.getElementById('libSort').addEventListener('change', e => {
+    sortBy=e.target.value;
+    localStorage.setItem(`gt_lib_sort_${_user}`, sortBy);
+    render();
+  });
   render();
 }
 
@@ -222,7 +256,7 @@ export async function renderGameDetail(id) {
         <div class="game-meta-row">
           ${statusBadge(game.status)}
           ${game.via_subscription?'<span class="sub-badge">📦 Played via Subscription</span>':''}
-          ${game.platform?`<span class="game-meta-item">📱 ${h(game.platform)}</span>`:''}
+          ${game.platform||game.platforms?`<span class="game-meta-item">📱 ${h(game.platforms||game.platform)}</span>`:''}
           ${game.release_year?`<span class="game-meta-item">📅 ${h(game.release_year)}</span>`:''}
           ${game.developer?`<span class="game-meta-item">🛠 ${h(game.developer)}</span>`:''}
           ${game.genre?`<span class="game-meta-item">🎭 ${h(game.genre)}</span>`:''}
@@ -230,10 +264,10 @@ export async function renderGameDetail(id) {
         ${game.description?`<p class="game-desc">${h(game.description)}</p>`:''}
         <div class="game-meta-row" style="margin-top:.75rem">
           <span class="game-meta-item">⏱ <strong>${fmtHours(game.total_hours)}</strong> played</span>
-          ${game.rating?`<span class="game-meta-item rating-display">${fmtStars(game.rating)}</span>`:''}
+          ${game.rating?`<span class="game-meta-item rating-display">${fmtStars(game.rating)} <span style="font-size:.8rem;color:var(--text3)">(${game.rating})</span></span>`:''}
           ${game.date_completed?`<span class="game-meta-item">✅ Completed ${fmtDate(game.date_completed)}</span>`:''}
         </div>
-        ${game.review?`<blockquote style="border-left:3px solid var(--accent);padding-left:1rem;margin-top:.75rem;color:var(--text2);font-size:.9rem;line-height:1.7">${h(game.review)}</blockquote>`:''}
+        ${game.review?`<blockquote class="game-review-block">${h(game.review)}</blockquote>`:''}
         <div class="game-actions">
           <button class="btn-primary" data-nav="game/${id}/edit">Edit Game</button>
           <button class="btn-outline" id="addSessionBtn">+ Log Session</button>
@@ -259,18 +293,22 @@ export async function renderGameDetail(id) {
       </div>
     </div>` : ''}
 
-    <!-- Log session modal -->
+    <!-- Log session modal — Section 5/9: end time defaults to now, playtime shortcut -->
     <div class="modal-overlay" id="sessionModal">
       <div class="modal">
         <div class="modal-head"><h3>Log Session</h3><button class="modal-close" id="closeSessionModal">×</button></div>
         <form id="sessionForm">
           <div class="two-col mb-md">
             <div class="form-group"><label>Date</label><input type="date" name="date" class="input" value="${todayISO()}" required></div>
-            <div class="form-group"><label>Duration</label></div>
+            <div class="form-group">
+              <label>How long did you play?</label>
+              <input type="text" id="playtimeShortcut" class="input" placeholder="e.g. 2h 30m or 1.5h">
+              <span class="duration-hint" id="playtimeHint"></span>
+            </div>
           </div>
           <div class="two-col mb-md">
-            <div class="form-group"><label>Start time</label><input type="time" name="start_time" class="input" required></div>
-            <div class="form-group"><label>End time</label><input type="time" name="end_time" class="input" required></div>
+            <div class="form-group"><label>Start time <span style="font-size:.7rem;color:var(--text3)">(auto-calculated)</span></label><input type="time" name="start_time" class="input"></div>
+            <div class="form-group"><label>End time <span style="font-size:.7rem;color:var(--accent)">(defaults to now)</span></label><input type="time" name="end_time" class="input"></div>
           </div>
           <div class="form-group mb-md"><label>Notes</label><input type="text" name="notes" class="input" placeholder="Optional notes…"></div>
           <div class="modal-actions">
@@ -291,11 +329,15 @@ export async function renderGameDetail(id) {
             <div class="complete-type-group">
               <label class="complete-type-opt">
                 <input type="radio" name="completion_type" value="completed" checked>
-                <span>✅ Completed</span>
+                <span>✅ Completed your main goal</span>
               </label>
               <label class="complete-type-opt">
                 <input type="radio" name="completion_type" value="100%">
                 <span>💯 100% Completed</span>
+              </label>
+              <label class="complete-type-opt">
+                <input type="radio" name="completion_type" value="no-ending">
+                <span>♾️ Game has no ending</span>
               </label>
             </div>
           </div>
@@ -349,9 +391,37 @@ export async function renderGameDetail(id) {
     });
   });
 
-  document.getElementById('addSessionBtn').onclick = () => openModal('sessionModal');
+  document.getElementById('addSessionBtn').onclick = () => {
+    // Section 5/9: default end time to now when modal opens
+    const endEl = document.querySelector('#sessionForm [name="end_time"]');
+    if (endEl) endEl.value = nowTimeHHMM();
+    openModal('sessionModal');
+  };
   document.getElementById('closeSessionModal').onclick = () => closeModal('sessionModal');
-  document.getElementById('cancelSession').onclick = () => closeModal('sessionModal');
+  document.getElementById('cancelSession').onclick     = () => closeModal('sessionModal');
+
+  // Section 5/9: playtime shortcut wiring
+  const playtimeInput = document.getElementById('playtimeShortcut');
+  const playtimeHint  = document.getElementById('playtimeHint');
+  const sessionForm   = document.getElementById('sessionForm');
+  if (playtimeInput) {
+    playtimeInput.addEventListener('input', () => {
+      const hrs = parsePlaytimeInput(playtimeInput.value);
+      const endEl   = sessionForm.querySelector('[name="end_time"]');
+      const startEl = sessionForm.querySelector('[name="start_time"]');
+      if (hrs !== null && hrs > 0 && endEl?.value) {
+        const [eh, em] = endEl.value.split(':').map(Number);
+        let startMin = (eh * 60 + em) - Math.round(hrs * 60);
+        if (startMin < 0) startMin += 1440;
+        const sh = Math.floor(startMin / 60), sm = startMin % 60;
+        startEl.value = `${String(sh).padStart(2,'0')}:${String(sm).padStart(2,'0')}`;
+        const h2 = Math.floor(hrs), m2 = Math.round((hrs - h2) * 60);
+        playtimeHint.textContent = `= ${h2}h ${m2}m`;
+      } else {
+        playtimeHint.textContent = '';
+      }
+    });
+  }
   document.getElementById('markCompleteBtn')?.addEventListener('click', () => openModal('completeModal'));
   const closeCompleteEl = document.getElementById('closeCompleteModal');
   if (closeCompleteEl) closeCompleteEl.onclick = () => closeModal('completeModal');
@@ -363,9 +433,21 @@ export async function renderGameDetail(id) {
   document.getElementById('sessionForm').addEventListener('submit', async e => {
     e.preventDefault();
     const fd  = new FormData(e.target);
-    const s   = fd.get('start_time'), en = fd.get('end_time');
-    const dur = parseDuration(s, en);
-    await DB.putSession(_user, { game_id:id, date:fd.get('date'), start_time:s, end_time:en, duration:dur, notes:fd.get('notes')||'' });
+    const endTime = fd.get('end_time') || nowTimeHHMM();
+    let startTime = fd.get('start_time');
+
+    // Section 5/9: if playtime shortcut was used, calculate start from end
+    const playtimeHrs = parsePlaytimeInput(document.getElementById('playtimeShortcut')?.value || '');
+    if ((!startTime || !startTime.trim()) && playtimeHrs) {
+      const [eh, em] = endTime.split(':').map(Number);
+      let sm2 = (eh * 60 + em) - Math.round(playtimeHrs * 60);
+      if (sm2 < 0) sm2 += 1440;
+      startTime = `${String(Math.floor(sm2/60)).padStart(2,'0')}:${String(sm2%60).padStart(2,'0')}`;
+    }
+    if (!startTime || !startTime.trim()) { toast('Enter a start time or playtime duration', 'error'); return; }
+
+    const dur = parseDuration(startTime, endTime);
+    await DB.putSession(_user, { game_id:id, date:fd.get('date'), start_time:startTime, end_time:endTime, duration:dur, notes:fd.get('notes')||'' });
     await DB.recalcGame(_user, id);
     await onDataChanged();
     toast(`Session logged: ${fmtHours(dur)}`, 'success');
@@ -411,11 +493,19 @@ export async function renderGameDetail(id) {
 
 /* ═══════════════════════════════════════════════════
    ADD / EDIT GAME FORM
+   Section 1: description autofill
+   Section 2: review when adding
+   Section 3: platform checkboxes
+   Section 6: star rating widget
+   Section 7: renamed "Total Hours in Library"
 ═══════════════════════════════════════════════════ */
 export async function renderGameForm(id) {
-  const isEdit = !!id;
-  const game   = isEdit ? await DB.getGame(_user, id) : null;
+  const isEdit  = !!id;
+  const game    = isEdit ? await DB.getGame(_user, id) : null;
   const settings = await DB.getAllSettings(_user);
+
+  // Section 3: get current platforms as array
+  const currentPlatforms = game?.platforms || (game?.platform ? game.platform : '');
 
   main().innerHTML = `
     <div class="page-header">
@@ -438,32 +528,64 @@ export async function renderGameForm(id) {
             <div class="form-group">
               <label>Status</label>
               <select name="status" class="input">
-                ${ALL_STATUSES.map(s=>`<option value="${s}"${(game?.status||'backlog')===s?' selected':''}>${s==='100%'?'💯 100% Completed':s.charAt(0).toUpperCase()+s.slice(1)}</option>`).join('')}
+                ${ALL_STATUSES.map(s=>`<option value="${s}"${(game?.status||'backlog')===s?' selected':''}>${statusLabel(s)}</option>`).join('')}
               </select>
             </div>
           </div>
+
+          <!-- Section 3: Platform checkboxes -->
+          <div class="form-group mb-md">
+            <label>Platforms owned</label>
+            <div class="platform-checkboxes" id="platformCheckboxes"></div>
+          </div>
+
           <div class="two-col mb-md">
-            <div class="form-group"><label>Platform</label><input type="text" name="platform" class="input" value="${h(game?.platform||'')}" placeholder="PC, PS5, Xbox…"></div>
             <div class="form-group"><label>Genre</label><input type="text" name="genre" class="input" value="${h(game?.genre||'')}" placeholder="RPG, FPS…"></div>
-          </div>
-          <div class="two-col mb-md">
             <div class="form-group"><label>Release Year</label><input type="text" name="release_year" class="input" value="${h(game?.release_year||'')}" placeholder="2024"></div>
-            <div class="form-group"><label>Hours Played (manual)</label><input type="number" name="manual_hours" class="input" value="${game?.manual_hours||0}" min="0" step="0.5"></div>
           </div>
-          <div class="form-group mb-md"><label>Developer</label><input type="text" name="developer" class="input" value="${h(game?.developer||'')}" placeholder="Studio name…"></div>
+
+          <!-- Section 7: Renamed to "Total Hours in Library" -->
+          <div class="two-col mb-md">
+            <div class="form-group">
+              <label>Total Hours in Library</label>
+              <input type="number" name="manual_hours" class="input" value="${game?.manual_hours||0}" min="0" step="0.5">
+              <p style="font-size:.72rem;color:var(--text3);margin-top:.2rem">Your total playtime across all platforms</p>
+            </div>
+            <div class="form-group"><label>Developer</label><input type="text" name="developer" class="input" value="${h(game?.developer||'')}" placeholder="Studio name…"></div>
+          </div>
+
           <div class="form-group mb-md"><label>Publisher</label><input type="text" name="publisher" class="input" value="${h(game?.publisher||'')}" placeholder="Publisher name…"></div>
-          <div class="form-group mb-md"><label>Description</label><textarea name="description" class="input" rows="3" placeholder="Brief description…">${h(game?.description||'')}</textarea></div>
+
+          <!-- Section 1: Description (auto-filled from IGDB/Steam) -->
+          <div class="form-group mb-md">
+            <label>Description <span style="font-size:.72rem;color:var(--text3)">(auto-fills from search)</span></label>
+            <textarea name="description" id="descriptionField" class="input" rows="3" placeholder="Auto-filled from game database, or write your own…">${h(game?.description||'')}</textarea>
+          </div>
 
           <div class="form-group mb-md">
             <label class="checkbox-row"><input type="checkbox" name="via_subscription" ${game?.via_subscription?'checked':''}> <span>Played via subscription (Game Pass, PS Plus, etc.)</span></label>
           </div>
 
+          <!-- Section 2: Review — shown for both add AND edit -->
+          <div class="form-group mb-md">
+            <label>Review / Notes <span style="font-size:.72rem;color:var(--text3)">(optional)</span></label>
+            <textarea name="review" class="input" rows="3" placeholder="Your thoughts on this game…">${h(game?.review||'')}</textarea>
+          </div>
+
           ${isEdit ? `
           <div class="two-col mb-md">
-            <div class="form-group"><label>Rating (0.5–5)</label><input type="number" name="rating" class="input" value="${h(game?.rating||'')}" min=".5" max="5" step=".5" placeholder="4.5"></div>
+            <div class="form-group">
+              <label>Rating</label>
+              <div class="star-rating-widget" id="starRatingWidget"></div>
+              <input type="hidden" name="rating" id="ratingHidden" value="${h(game?.rating||'')}">
+            </div>
             <div class="form-group"><label>Date Completed</label><input type="date" name="date_completed" class="input" value="${h(game?.date_completed||'')}"></div>
-          </div>
-          <div class="form-group mb-md"><label>Review / Notes</label><textarea name="review" class="input" rows="3">${h(game?.review||'')}</textarea></div>` : ''}
+          </div>` : `
+          <div class="form-group mb-md">
+            <label>Rating <span style="font-size:.72rem;color:var(--text3)">(optional)</span></label>
+            <div class="star-rating-widget" id="starRatingWidget"></div>
+            <input type="hidden" name="rating" id="ratingHidden" value="">
+          </div>`}
 
           <div class="modal-actions" style="margin-top:1.5rem">
             <button type="button" class="btn-outline" onclick="history.back()">Cancel</button>
@@ -478,6 +600,13 @@ export async function renderGameForm(id) {
           <div class="cover-preview-ph">🎮</div>
         </div>
         <input type="url" name="cover_url" id="coverUrlInput" class="input mt-sm" placeholder="https://…" value="${h(game?.cover_url||'')}">
+        <div class="cover-upload-row mt-sm">
+          <label class="btn-outline" style="cursor:pointer;font-size:.8rem;padding:.35rem .75rem">
+            📁 Upload image
+            <input type="file" id="coverFileInput" accept="image/*" style="display:none">
+          </label>
+          ${game?.cover_url ? `<button type="button" class="btn-xs btn-xs-danger" id="clearCoverBtn">Clear</button>` : ''}
+        </div>
         ${game?.cover_alts?.length > 1 ? `
         <div class="cover-alts-scroll" id="coverAltsRow">
           ${game.cover_alts.map(url=>`
@@ -486,24 +615,48 @@ export async function renderGameForm(id) {
       </div>
     </div>`;
 
-  // Cover preview wired to hidden input
+  // Section 3: Render platform checkboxes
+  renderPlatformCheckboxes('platformCheckboxes', currentPlatforms);
+
+  // Section 6: Star rating widget
+  const starWidget = renderStarRating('starRatingWidget', game?.rating || 0, val => {
+    document.getElementById('ratingHidden').value = val > 0 ? val : '';
+  });
+
+  // Cover preview
   const coverInput = document.getElementById('coverUrlInput');
   setupCoverPreview(coverInput, document.getElementById('coverPreview'));
   if (game?.cover_url) {
-    document.getElementById('coverPreview').innerHTML = `<img src="${h(game.cover_url)}" style="width:100%;height:100%;object-fit:cover">`;
+    document.getElementById('coverPreview').innerHTML = `<img src="${h(game.cover_url)}" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.innerHTML='<div class=cover-preview-ph>🎮</div>'">`;
   }
 
-  // Cover alt thumbnails click
+  // Custom poster upload
+  document.getElementById('coverFileInput')?.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      coverInput.value = ev.target.result;
+      coverInput.dispatchEvent(new Event('input'));
+    };
+    reader.readAsDataURL(file);
+  });
+
+  const clearCoverBtn = document.getElementById('clearCoverBtn');
+  if (clearCoverBtn) clearCoverBtn.addEventListener('click', () => {
+    coverInput.value = '';
+    coverInput.dispatchEvent(new Event('input'));
+  });
+
   document.getElementById('coverAltsRow')?.addEventListener('click', e => {
     const thumb = e.target.closest('.cover-alt-thumb');
     if (!thumb) return;
-    const url = thumb.dataset.url;
-    coverInput.value = url;
+    coverInput.value = thumb.dataset.url;
     coverInput.dispatchEvent(new Event('input'));
-    document.querySelectorAll('.cover-alt-thumb').forEach(t=>t.classList.toggle('selected', t.dataset.url===url));
+    document.querySelectorAll('.cover-alt-thumb').forEach(t=>t.classList.toggle('selected', t.dataset.url===thumb.dataset.url));
   });
 
-  // Autocomplete
+  // Autocomplete — Section 1: auto-fill description
   const acInput = document.getElementById('gameSearch');
   const acDrop  = document.getElementById('gameAcDrop');
   const acStat  = document.getElementById('searchStatus');
@@ -516,13 +669,18 @@ export async function renderGameForm(id) {
       const detail = await getGameDetail(item.slug, settings);
       const merged = { ...item, ...detail };
 
-      document.querySelector('[name="title"]').value       = merged.title||'';
-      document.querySelector('[name="platform"]').value    = merged.platform||'';
-      document.querySelector('[name="developer"]').value   = merged.developer||'';
-      document.querySelector('[name="publisher"]').value   = merged.publisher||'';
-      document.querySelector('[name="description"]').value = merged.description||'';
+      document.querySelector('[name="title"]').value       = merged.title || '';
+      document.querySelector('[name="genre"]').value       = merged.genres || merged.genre || '';
+      document.querySelector('[name="developer"]').value   = merged.developer || '';
+      document.querySelector('[name="publisher"]').value   = merged.publisher || '';
       if (merged.release_year) document.querySelector('[name="release_year"]').value = merged.release_year;
-      if (merged.genres) document.querySelector('[name="genre"]').value = merged.genres;
+
+      // Section 1: auto-fill description
+      const descField = document.getElementById('descriptionField');
+      if (descField && merged.description) descField.value = merged.description;
+
+      // Section 3: auto-fill platforms from IGDB
+      if (merged.platform) renderPlatformCheckboxes('platformCheckboxes', merged.platform);
 
       // Update cover
       if (merged.cover_url) {
@@ -531,28 +689,26 @@ export async function renderGameForm(id) {
       }
 
       // Show cover alts
-      const alts = merged.cover_alts||[];
+      const alts = merged.cover_alts || [];
       const altsRow = document.getElementById('coverAltsRow');
       if (alts.length > 1) {
         altsRow.style.display = 'flex';
-        altsRow.innerHTML = alts.map(url=>
+        altsRow.innerHTML = alts.map(url =>
           `<img src="${h(url)}" class="cover-alt-thumb${url===merged.cover_url?' selected':''}" data-url="${h(url)}" loading="lazy" title="Select poster">`
         ).join('');
         altsRow.addEventListener('click', ev => {
           const thumb = ev.target.closest('.cover-alt-thumb');
           if (!thumb) return;
-          const url = thumb.dataset.url;
-          coverInput.value = url;
+          coverInput.value = thumb.dataset.url;
           coverInput.dispatchEvent(new Event('input'));
-          altsRow.querySelectorAll('.cover-alt-thumb').forEach(t=>t.classList.toggle('selected', t.dataset.url===url));
+          altsRow.querySelectorAll('.cover-alt-thumb').forEach(t=>t.classList.toggle('selected', t.dataset.url===thumb.dataset.url));
         });
       }
-
       acStat.textContent = `✓ Loaded: ${merged.title}`;
     }
   });
 
-  // Delete button (edit mode)
+  // Delete button
   document.getElementById('deleteGameTopBtn')?.addEventListener('click', async () => {
     const ok = await confirm(`Delete "${game.title}"? This will also remove all sessions.`);
     if (ok) { await DB.deleteGame(_user, id); await onDataChanged(); toast(`"${game.title}" deleted`,'info'); _nav('library'); }
@@ -564,57 +720,71 @@ export async function renderGameForm(id) {
     const fd  = new FormData(e.target);
     const now = todayISO();
 
-    // Collect cover_alts from current alts row
+    // Section 3: collect selected platforms
+    const platforms = getSelectedPlatforms('platformCheckboxes');
+
     const altThumbs = [...document.querySelectorAll('.cover-alt-thumb')].map(t=>t.dataset.url).filter(Boolean);
 
     const obj = {
       title:        fd.get('title').trim(),
       status:       fd.get('status'),
-      platform:     fd.get('platform').trim(),
+      platforms:    platforms,           // Section 3: multi-platform
+      platform:     platforms,           // keep old field for compatibility
       genre:        fd.get('genre').trim(),
       release_year: fd.get('release_year').trim(),
       cover_url:    coverInput.value.trim(),
       cover_alts:   altThumbs.length ? altThumbs : (coverInput.value ? [coverInput.value] : []),
       developer:    fd.get('developer').trim(),
       publisher:    fd.get('publisher').trim(),
-      description:  fd.get('description').trim(),
+      description:  fd.get('description').trim(),  // Section 1
       manual_hours: parseFloat(fd.get('manual_hours')||0),
       via_subscription: fd.get('via_subscription')==='on',
-      rating:       fd.get('rating')||null,
-      review:       fd.get('review')||'',
-      date_completed: fd.get('date_completed')||null,
-      date_added:   game?.date_added||now,
+      rating:       fd.get('rating') || null,      // Section 6
+      review:       fd.get('review') || '',         // Section 2
+      date_completed: fd.get('date_completed') || null,
+      date_added:   game?.date_added || now,
     };
+
     if (!obj.title) { toast('Title is required','error'); return; }
+
     if (isEdit) {
-      obj.id              = id;
-      obj.calculated_hours = game.calculated_hours||0;
-      obj.total_hours      = obj.manual_hours + (game.calculated_hours||0);
-      obj.last_played      = game.last_played||null;
+      obj.id               = id;
+      obj.calculated_hours = game.calculated_hours || 0;
+      obj.total_hours      = obj.manual_hours + (game.calculated_hours || 0);
+      obj.last_played      = game.last_played || null;
     } else {
       obj.total_hours      = obj.manual_hours;
       obj.calculated_hours = 0;
     }
+
     await DB.putGame(_user, obj);
     await onDataChanged();
-    toast(isEdit?'Game updated!':'Game added to library!','success');
-    _nav(isEdit?`game/${id}`:'library');
+    toast(isEdit ? 'Game updated!' : 'Game added to library!', 'success');
+    _nav(isEdit ? `game/${id}` : 'library');
   });
 }
 
 /* ═══════════════════════════════════════════════════
-   BROWSE (Trending / Steam Featured)
+   BROWSE (Trending / Steam Featured + Search)
 ═══════════════════════════════════════════════════ */
 export async function renderBrowse() {
+  const settings = await DB.getAllSettings(_user);
+  const hasIGDB  = !!(settings.igdb_client_id && settings.igdb_client_secret);
+
   main().innerHTML = `
     <div class="page-header">
       <h1>Browse</h1>
       <button class="btn-outline" id="refreshBrowse">↻ Refresh</button>
     </div>
+    <div class="browse-search-bar">
+      <input type="search" id="browseSearchInput" class="input" placeholder="Search ${hasIGDB ? 'IGDB' : 'Steam'}…" autocomplete="off">
+      <button class="btn-primary" id="browseSearchBtn">Search</button>
+    </div>
+    <p class="search-status" id="browseSearchStatus" style="margin-bottom:1rem"></p>
     <div id="browseContent">
       <div class="browse-loading">
         <div class="spinner"></div>
-        <p>Loading trending games from Steam…</p>
+        <p>Loading trending games…</p>
       </div>
     </div>`;
 
@@ -624,10 +794,99 @@ export async function renderBrowse() {
     renderBrowse();
   };
 
-  await _loadBrowse();
+  // Browse search
+  const browseInput = document.getElementById('browseSearchInput');
+  const browseBtn   = document.getElementById('browseSearchBtn');
+  const browseStatus = document.getElementById('browseSearchStatus');
+
+  async function doSearch() {
+    const q = browseInput.value.trim();
+    if (!q) { _loadBrowse(settings); return; }
+    browseStatus.textContent = 'Searching…';
+    const container = document.getElementById('browseContent');
+    container.innerHTML = `<div class="browse-loading"><div class="spinner"></div><p>Searching…</p></div>`;
+    try {
+      const results = await searchBrowse(q, settings);
+      browseStatus.textContent = `${results.length} result${results.length !== 1 ? 's' : ''} for "${q}"`;
+      if (!results.length) {
+        container.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><h3>No results found</h3><p>Try a different search term.</p></div>`;
+        return;
+      }
+      const games    = await DB.getGames(_user);
+      const wishlist = await DB.getWishlist(_user);
+      container.innerHTML = `
+        <div class="browse-section">
+          <div class="browse-grid">
+            ${results.map(g => _browseCardHtml(g, games, wishlist)).join('')}
+          </div>
+        </div>`;
+      _attachBrowseHandlers(container, settings);
+    } catch(e) {
+      browseStatus.textContent = 'Search failed — check your connection';
+      container.innerHTML = `<div class="empty-state"><div class="empty-icon">📡</div><h3>Search unavailable</h3></div>`;
+    }
+  }
+
+  browseBtn.addEventListener('click', doSearch);
+  browseInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+  await _loadBrowse(settings);
 }
 
-async function _loadBrowse() {
+function _browseCardHtml(g, games, wishlist) {
+  const inLib  = games.find(lg => lg.title.toLowerCase() === g.title.toLowerCase());
+  const inWish = wishlist.find(w => w.title.toLowerCase() === g.title.toLowerCase());
+  const disc   = g.discount > 0 ? `<div class="browse-discount">-${g.discount}%</div>` : '';
+  const price  = g.price_final ? `<div class="browse-price${g.discount>0?' on-sale':''}">£${g.price_final}${g.discount>0&&g.price_orig?` <s style="opacity:.5;font-size:.75em">£${g.price_orig}</s>`:''}</div>` : '';
+  const coverSrc = h(g.header_url || g.cover_url);
+  const fallback = h(g.cover_url || '');
+  return `
+    <div class="browse-card">
+      <div class="browse-card-img-wrap">
+        <img src="${coverSrc}" class="browse-card-img" loading="lazy"
+          onerror="this.src='${fallback}';this.onerror=function(){this.parentElement.innerHTML='<div class=browse-card-ph>${h((g.title||'').slice(0,2).toUpperCase())}</div>'}">
+        ${disc}
+      </div>
+      <div class="browse-card-body">
+        <div class="browse-card-title">${h(g.title)}</div>
+        ${g.release_date ? `<div class="browse-card-meta">📅 ${h(g.release_date)}</div>` : g.release_year ? `<div class="browse-card-meta">📅 ${h(g.release_year)}</div>` : ''}
+        ${g.platform ? `<div class="browse-card-meta">📱 ${h(g.platform)}</div>` : ''}
+        ${price}
+        <div class="browse-card-actions">
+          ${inLib
+            ? `<span class="btn-xs btn-xs-muted">✓ In Library</span>`
+            : `<button class="btn-xs btn-primary browse-add-lib" data-slug="${h(g.slug||'')}" data-title="${h(g.title)}" data-cover="${h(g.cover_url)}" data-appid="${h(g.steam_appid||'')}">+ Library</button>`}
+          ${inWish
+            ? `<span class="btn-xs btn-xs-muted">♥ Wishlisted</span>`
+            : `<button class="btn-xs browse-add-wish" data-slug="${h(g.slug||'')}" data-title="${h(g.title)}" data-cover="${h(g.cover_url)}" data-price="${h(g.price_final||'')}" data-discount="${g.discount||0}" data-appid="${h(g.steam_appid||'')}">♡ Wishlist</button>`}
+        </div>
+      </div>
+    </div>`;
+}
+
+function _attachBrowseHandlers(container, settings) {
+  container.addEventListener('click', async e => {
+    const libBtn  = e.target.closest('.browse-add-lib');
+    const wishBtn = e.target.closest('.browse-add-wish');
+    if (libBtn) {
+      const title = libBtn.dataset.title, cover = libBtn.dataset.cover, appid = libBtn.dataset.appid;
+      await DB.putGame(_user, { title, cover_url: cover, steam_appid: appid||null, status: 'backlog', date_added: todayISO(), manual_hours:0, calculated_hours:0, total_hours:0 });
+      await onDataChanged();
+      toast(`"${title}" added to library!`,'success');
+      libBtn.outerHTML = `<span class="btn-xs btn-xs-muted">✓ In Library</span>`;
+    }
+    if (wishBtn) {
+      const title = wishBtn.dataset.title, cover = wishBtn.dataset.cover;
+      const price = wishBtn.dataset.price, discount = parseInt(wishBtn.dataset.discount)||0;
+      await DB.putWishlistItem(_user, { title, cover_url: cover, priority: 2, price_current: price?`£${price}`:null, on_sale: discount>0, price_updated: todayISO() });
+      await onDataChanged();
+      toast(`"${title}" added to wishlist!`,'success');
+      wishBtn.outerHTML = `<span class="btn-xs btn-xs-muted">♥ Wishlisted</span>`;
+    }
+  });
+}
+
+async function _loadBrowse(settings) {
   const container = document.getElementById('browseContent');
   if (!container) return;
 
@@ -642,75 +901,18 @@ async function _loadBrowse() {
     return;
   }
 
-  const games  = await DB.getGames(_user);
+  const games    = await DB.getGames(_user);
   const wishlist = await DB.getWishlist(_user);
 
   container.innerHTML = sections.map(section => `
     <div class="browse-section">
       <div class="card-head"><h2 class="browse-section-title">${h(section.label)}</h2></div>
       <div class="browse-grid">
-        ${section.games.map(g => {
-          const inLib  = games.find(lg => lg.title.toLowerCase() === g.title.toLowerCase());
-          const inWish = wishlist.find(w => w.title.toLowerCase() === g.title.toLowerCase());
-          const disc   = g.discount > 0 ? `<div class="browse-discount">-${g.discount}%</div>` : '';
-          const price  = g.price_final ? `<div class="browse-price${g.discount>0?' on-sale':''}">£${g.price_final}${g.discount>0&&g.price_orig?` <s style="opacity:.5;font-size:.75em">£${g.price_orig}</s>`:''}</div>` : '';
-          return `
-          <div class="browse-card">
-            <div class="browse-card-img-wrap">
-              <img src="${h(g.header_url||g.cover_url)}" class="browse-card-img" loading="lazy"
-                onerror="this.src='${h(g.cover_url||'')}';this.onerror=null">
-              ${disc}
-            </div>
-            <div class="browse-card-body">
-              <div class="browse-card-title">${h(g.title)}</div>
-              ${price}
-              <div class="browse-card-actions">
-                ${inLib
-                  ? `<span class="btn-xs btn-xs-muted" title="Already in library">✓ In Library</span>`
-                  : `<button class="btn-xs btn-primary browse-add-lib" data-slug="${h(g.slug)}" data-title="${h(g.title)}" data-cover="${h(g.cover_url)}" data-appid="${h(g.steam_appid||'')}">+ Library</button>`}
-                ${inWish
-                  ? `<span class="btn-xs btn-xs-muted" title="Already in wishlist">♥ Wishlisted</span>`
-                  : `<button class="btn-xs browse-add-wish" data-slug="${h(g.slug)}" data-title="${h(g.title)}" data-cover="${h(g.cover_url)}" data-price="${h(g.price_final||'')}" data-discount="${g.discount}" data-appid="${h(g.steam_appid||'')}">♡ Wishlist</button>`}
-              </div>
-            </div>
-          </div>`;
-        }).join('')}
+        ${section.games.map(g => _browseCardHtml(g, games, wishlist)).join('')}
       </div>
     </div>`).join('');
 
-  container.addEventListener('click', async e => {
-    const libBtn  = e.target.closest('.browse-add-lib');
-    const wishBtn = e.target.closest('.browse-add-wish');
-
-    if (libBtn) {
-      const title = libBtn.dataset.title;
-      const cover = libBtn.dataset.cover;
-      const slug  = libBtn.dataset.slug;
-      await DB.putGame(_user, {
-        title, cover_url: cover, slug, status: 'backlog',
-        date_added: todayISO(), manual_hours: 0, calculated_hours: 0, total_hours: 0,
-      });
-      await onDataChanged();
-      toast(`"${title}" added to library!`,'success');
-      libBtn.outerHTML = `<span class="btn-xs btn-xs-muted">✓ In Library</span>`;
-    }
-
-    if (wishBtn) {
-      const title    = wishBtn.dataset.title;
-      const cover    = wishBtn.dataset.cover;
-      const price    = wishBtn.dataset.price;
-      const discount = parseInt(wishBtn.dataset.discount)||0;
-      await DB.putWishlistItem(_user, {
-        title, cover_url: cover, priority: 2,
-        price_current: price ? `£${price}` : null,
-        on_sale: discount > 0,
-        price_updated: todayISO(),
-      });
-      await onDataChanged();
-      toast(`"${title}" added to wishlist!`,'success');
-      wishBtn.outerHTML = `<span class="btn-xs btn-xs-muted">♥ Wishlisted</span>`;
-    }
-  });
+  _attachBrowseHandlers(container, settings);
 }
 
 /* ═══════════════════════════════════════════════════
@@ -721,12 +923,18 @@ export async function renderLog() {
   const sessions = await DB.getSessions(_user);
   const libGames = games.filter(g=>g.status!=='wishlist');
 
+  // Section 8: sort sessions newest first within each day, days newest first
   const byDate = {};
   for (const s of sessions) {
     if (!byDate[s.date]) byDate[s.date]=[];
     const gm = games.find(g=>g.id===s.game_id);
     byDate[s.date].push({ ...s, game: gm });
   }
+  // Sort sessions within each day newest first
+  for (const day of Object.keys(byDate)) {
+    byDate[day].sort((a,b) => (b.start_time||'').localeCompare(a.start_time||''));
+  }
+  // Sort days newest first
   const sortedDays = Object.entries(byDate).sort((a,b)=>b[0].localeCompare(a[0]));
 
   main().innerHTML = `
@@ -735,6 +943,7 @@ export async function renderLog() {
       <button class="btn-primary" id="openLogModal">+ Log Session</button>
     </div>
 
+    <!-- Section 5/9: Log modal with end-time default + playtime shortcut -->
     <div class="modal-overlay" id="logModal">
       <div class="modal">
         <div class="modal-head"><h3>Log Session</h3><button class="modal-close" id="closeLogModal">×</button></div>
@@ -750,11 +959,15 @@ export async function renderLog() {
           </div>
           <div class="two-col mb-md">
             <div class="form-group"><label>Date</label><input type="date" name="date" class="input" value="${todayISO()}" required></div>
-            <div class="form-group"><label>Duration</label></div>
+            <div class="form-group">
+              <label>How long did you play?</label>
+              <input type="text" id="logPlaytime" class="input" placeholder="e.g. 2h 30m">
+              <span class="duration-hint" id="logPlaytimeHint"></span>
+            </div>
           </div>
           <div class="two-col mb-md">
-            <div class="form-group"><label>Start time</label><input type="time" name="start_time" class="input" required></div>
-            <div class="form-group"><label>End time</label><input type="time" name="end_time" class="input" required></div>
+            <div class="form-group"><label>Start time <span style="font-size:.7rem;color:var(--text3)">(auto-calculated)</span></label><input type="time" name="start_time" class="input"></div>
+            <div class="form-group"><label>End time <span style="font-size:.7rem;color:var(--accent)">(defaults to now)</span></label><input type="time" name="end_time" class="input"></div>
           </div>
           <div class="form-group mb-md"><label>Notes</label><input type="text" name="notes" class="input" placeholder="Optional…"></div>
           <div class="modal-actions">
@@ -780,10 +993,35 @@ export async function renderLog() {
           </div>`).join('')}
     </div>`;
 
-  document.getElementById('openLogModal').onclick  = () => openModal('logModal');
+  document.getElementById('openLogModal').onclick  = () => {
+    // Section 5/9: default end time to now
+    const endEl = document.querySelector('#logForm [name="end_time"]');
+    if (endEl) endEl.value = nowTimeHHMM();
+    openModal('logModal');
+  };
   document.getElementById('closeLogModal').onclick = () => closeModal('logModal');
   document.getElementById('cancelLog').onclick     = () => closeModal('logModal');
   attachDurationCalc(document.getElementById('logForm'));
+
+  // Section 5/9: playtime shortcut for log page
+  const logPlaytimeEl   = document.getElementById('logPlaytime');
+  const logPlaytimeHint = document.getElementById('logPlaytimeHint');
+  const logFormEl       = document.getElementById('logForm');
+  if (logPlaytimeEl) {
+    logPlaytimeEl.addEventListener('input', () => {
+      const hrs    = parsePlaytimeInput(logPlaytimeEl.value);
+      const endEl  = logFormEl.querySelector('[name="end_time"]');
+      const startEl= logFormEl.querySelector('[name="start_time"]');
+      if (hrs !== null && hrs > 0 && endEl?.value) {
+        const [eh, em] = endEl.value.split(':').map(Number);
+        let sm = (eh * 60 + em) - Math.round(hrs * 60);
+        if (sm < 0) sm += 1440;
+        startEl.value = `${String(Math.floor(sm/60)).padStart(2,'0')}:${String(sm%60).padStart(2,'0')}`;
+        const h2 = Math.floor(hrs), m2 = Math.round((hrs - h2) * 60);
+        logPlaytimeHint.textContent = `= ${h2}h ${m2}m`;
+      } else { logPlaytimeHint.textContent = ''; }
+    });
+  }
 
   // Log game search — searches library first, then fallback to game DB
   const settings = await DB.getAllSettings(_user);
@@ -839,19 +1077,29 @@ export async function renderLog() {
           title, status: 'playing', date_added: todayISO(),
           manual_hours: 0, calculated_hours: 0, total_hours: 0,
         };
-        const savedId = await DB.putGame(_user, newGame);
-        // putGame returns undefined, need to fetch it
+        await DB.putGame(_user, newGame);
         const allGames = await DB.getGames(_user);
-        const found = allGames.find(g => g.title === title && !g.id.startsWith('local'));
+        const found = allGames.find(g => g.title === title);
         gameId = found?.id;
       }
     }
 
-    const s   = fd.get('start_time'), en = fd.get('end_time');
-    const dur = parseDuration(s, en);
+    // Section 5/9: resolve times from shortcut or explicit fields
+    const endTime   = fd.get('end_time') || nowTimeHHMM();
+    let   startTime = fd.get('start_time');
+    const ptHrs     = parsePlaytimeInput(logPlaytimeEl?.value || '');
+    if ((!startTime || !startTime.trim()) && ptHrs) {
+      const [eh, em] = endTime.split(':').map(Number);
+      let sm = (eh * 60 + em) - Math.round(ptHrs * 60);
+      if (sm < 0) sm += 1440;
+      startTime = `${String(Math.floor(sm/60)).padStart(2,'0')}:${String(sm%60).padStart(2,'0')}`;
+    }
+    if (!startTime || !startTime.trim()) { toast('Enter a start time or playtime duration','error'); return; }
+
+    const dur = parseDuration(startTime, endTime);
     await DB.putSession(_user, {
       game_id: gameId||null, title_fallback: gameId?null:title,
-      date: fd.get('date'), start_time: s, end_time: en, duration: dur,
+      date: fd.get('date'), start_time: startTime, end_time: endTime, duration: dur,
       notes: fd.get('notes')||'',
     });
     if (gameId) await DB.recalcGame(_user, gameId);
@@ -890,6 +1138,224 @@ async function _promptAddToLibrary(title) {
     document.body.appendChild(ov);
     ov.querySelector('#_pyes').onclick = () => { ov.remove(); resolve(true); };
     ov.querySelector('#_pno').onclick  = () => { ov.remove(); resolve(false); };
+  });
+}
+
+/* ═══════════════════════════════════════════════════
+   SESSION LOGGER (Section 6 — Live play tracker)
+═══════════════════════════════════════════════════ */
+const ACTIVE_SESSION_KEY = 'gt_active_session';
+
+export async function renderSessionLogger() {
+  const games    = await DB.getGames(_user);
+  const settings = await DB.getAllSettings(_user);
+  const libGames = games.filter(g => g.status !== 'wishlist');
+  const recent   = [...libGames]
+    .filter(g => g.last_played)
+    .sort((a,b) => b.last_played.localeCompare(a.last_played))
+    .slice(0, 4);
+
+  // Check if a session is already running
+  let activeSession = null;
+  try {
+    const raw = localStorage.getItem(`${ACTIVE_SESSION_KEY}_${_user}`);
+    if (raw) activeSession = JSON.parse(raw);
+  } catch(e) {}
+
+  main().innerHTML = `
+    <div class="page-header">
+      <h1>Session Logger</h1>
+    </div>
+
+    ${activeSession ? `
+    <!-- Active session in progress -->
+    <div class="session-logger-active card mb-lg">
+      <div class="card-head">
+        <h3>⏱ Session in progress</h3>
+        <span class="session-live-badge">LIVE</span>
+      </div>
+      <div class="card-body">
+        <div class="session-logger-game-name">${h(activeSession.title)}</div>
+        <div class="session-logger-timer" id="sessionTimer">Calculating…</div>
+        <div class="session-logger-started">Started: ${new Date(activeSession.startTime).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</div>
+        <div class="modal-actions" style="margin-top:1.25rem">
+          <button class="btn-danger" id="endSessionBtn">⏹ End Session</button>
+        </div>
+      </div>
+    </div>` : `
+    <!-- No session — start one -->
+    <div class="card mb-lg">
+      <div class="card-head"><h3>Start a session</h3></div>
+      <div class="card-body">
+        ${recent.length ? `
+        <div class="form-group mb-md">
+          <label>Recently played</label>
+          <div class="session-quick-picks">
+            ${recent.map(g => `
+              <button class="session-quick-pick" data-game-id="${g.id}" data-title="${h(g.title)}">
+                ${g.cover_url ? `<img src="${h(g.cover_url)}" class="session-quick-cover" loading="lazy" onerror="this.style.display='none'">` : ''}
+                <span>${h(g.title)}</span>
+              </button>`).join('')}
+          </div>
+        </div>` : ''}
+        <div class="form-group mb-md">
+          <label>Or search for a game</label>
+          <div class="autocomplete-wrap">
+            <input type="text" id="sessionGameSearch" class="input" placeholder="Search your library…" autocomplete="off">
+            <div class="autocomplete-dropdown" id="sessionGameDrop"></div>
+          </div>
+          <p id="sessionGameStatus" class="search-status"></p>
+        </div>
+        <div id="sessionSelectedGame" style="display:none" class="session-selected-banner mb-md">
+          Selected: <strong id="sessionSelectedTitle"></strong>
+        </div>
+        <button class="btn-primary" id="startSessionBtn" disabled>▶ Start Playing</button>
+      </div>
+    </div>`}
+
+    <!-- Break / end session modal -->
+    <div class="modal-overlay" id="endSessionModal">
+      <div class="modal modal-sm">
+        <div class="modal-head"><h3>End Session</h3><button class="modal-close" id="closeEndModal">×</button></div>
+        <p style="color:var(--text2);font-size:.9rem;margin-bottom:1rem">Did you take any breaks?</p>
+        <div class="form-group mb-md">
+          <label>Total break time (minutes)</label>
+          <input type="number" id="breakMinutes" class="input" value="0" min="0" placeholder="0">
+        </div>
+        <div id="sessionCalcPreview" style="font-size:.85rem;color:var(--text3);margin-bottom:1rem"></div>
+        <div class="modal-actions">
+          <button class="btn-outline" id="cancelEndSession">Cancel</button>
+          <button class="btn-primary" id="confirmEndSession">Save Session</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>What is Session Logger?</h3></div>
+      <div class="card-body" style="color:var(--text2);font-size:.9rem;line-height:1.7">
+        <p>Session Logger automatically tracks how long you play a game in real time.</p>
+        <ol style="margin:1rem 0 0 1.25rem;display:flex;flex-direction:column;gap:.5rem">
+          <li>Select a game from your recently played list or search.</li>
+          <li>Press <strong>Start Playing</strong> — the timer starts.</li>
+          <li>When you're done, press <strong>End Session</strong>.</li>
+          <li>Enter any break time (e.g. 15 minutes for a lunch break).</li>
+          <li>Your actual playtime is calculated and added to the game's total.</li>
+        </ol>
+        <p style="margin-top:1rem">⚡ The session persists across page refreshes — you can safely navigate away and come back.</p>
+      </div>
+    </div>`;
+
+  // Live timer update
+  if (activeSession) {
+    function updateTimer() {
+      const el = document.getElementById('sessionTimer');
+      if (!el) { clearInterval(_timerInterval); return; }
+      const elapsed = (Date.now() - activeSession.startTime) / 1000 / 3600;
+      el.textContent = fmtHours(elapsed);
+    }
+    updateTimer();
+    const _timerInterval = setInterval(updateTimer, 10000);
+
+    document.getElementById('endSessionBtn').onclick = () => {
+      // Update preview on break input
+      const breakEl = document.getElementById('breakMinutes');
+      function updatePreview() {
+        const breaks = parseFloat(breakEl.value) || 0;
+        const totalMs = Date.now() - activeSession.startTime;
+        const totalHrs = totalMs / 1000 / 3600;
+        const actualHrs = Math.max(0, totalHrs - breaks / 60);
+        document.getElementById('sessionCalcPreview').textContent =
+          `Total time: ${fmtHours(totalHrs)} − ${breaks}min breaks = ${fmtHours(actualHrs)} logged`;
+      }
+      updatePreview();
+      breakEl.addEventListener('input', updatePreview);
+      openModal('endSessionModal');
+    };
+
+    document.getElementById('closeEndModal').onclick = () => closeModal('endSessionModal');
+    document.getElementById('cancelEndSession').onclick = () => closeModal('endSessionModal');
+
+    document.getElementById('confirmEndSession').onclick = async () => {
+      const breaks  = parseFloat(document.getElementById('breakMinutes').value) || 0;
+      const endTime = new Date();
+      const startTime = new Date(activeSession.startTime);
+      const totalMs = endTime - startTime;
+      const totalHrs = totalMs / 1000 / 3600;
+      const actualHrs = Math.max(0.016, totalHrs - breaks / 60); // min 1 min
+
+      // Build start/end time strings
+      const st = startTime.toTimeString().slice(0,5);
+      const et = endTime.toTimeString().slice(0,5);
+      const dt = startTime.toISOString().slice(0,10);
+
+      await DB.putSession(_user, {
+        game_id: activeSession.gameId || null,
+        title_fallback: activeSession.gameId ? null : activeSession.title,
+        date: dt, start_time: st, end_time: et,
+        duration: +actualHrs.toFixed(4),
+        notes: `Auto-logged via Session Logger${breaks > 0 ? ` (${breaks}min break)` : ''}`,
+      });
+      if (activeSession.gameId) await DB.recalcGame(_user, activeSession.gameId);
+      await onDataChanged();
+
+      // Clear active session
+      localStorage.removeItem(`${ACTIVE_SESSION_KEY}_${_user}`);
+      toast(`Session saved: ${fmtHours(actualHrs)} played!`, 'success');
+      clearInterval(_timerInterval);
+      closeAllModals();
+      renderSessionLogger();
+    };
+    return;
+  }
+
+  // No active session — setup game picker
+  let _selectedGameId = null, _selectedTitle = '';
+
+  function setSelectedGame(id, title) {
+    _selectedGameId = id;
+    _selectedTitle  = title;
+    const banner = document.getElementById('sessionSelectedGame');
+    document.getElementById('sessionSelectedTitle').textContent = title;
+    banner.style.display = 'block';
+    document.getElementById('startSessionBtn').disabled = false;
+  }
+
+  // Quick picks
+  document.querySelectorAll('.session-quick-pick').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.session-quick-pick').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      setSelectedGame(btn.dataset.gameId, btn.dataset.title);
+    });
+  });
+
+  // Search autocomplete
+  new Autocomplete({
+    input: document.getElementById('sessionGameSearch'),
+    dropdown: document.getElementById('sessionGameDrop'),
+    status: document.getElementById('sessionGameStatus'),
+    onSearch: async q => ({
+      results: libGames
+        .filter(g => g.title.toLowerCase().includes(q.toLowerCase()))
+        .slice(0, 8)
+        .map(g => ({ ...g, source: 'library', slug: `local:${g.id}` }))
+    }),
+    onSelect: item => {
+      document.getElementById('sessionGameSearch').value = item.title;
+      setSelectedGame(item.id, item.title);
+    }
+  });
+
+  document.getElementById('startSessionBtn').addEventListener('click', () => {
+    if (!_selectedTitle) return;
+    const session = {
+      gameId: _selectedGameId,
+      title:  _selectedTitle,
+      startTime: Date.now(),
+    };
+    localStorage.setItem(`${ACTIVE_SESSION_KEY}_${_user}`, JSON.stringify(session));
+    toast(`Started session: ${_selectedTitle}`, 'success');
+    renderSessionLogger();
   });
 }
 
@@ -949,7 +1415,7 @@ export async function renderStats() {
             ${status_counts.map(sc=>{
               const max = Math.max(...status_counts.map(x=>x.cnt),1);
               const pct = Math.round((sc.cnt/max)*100);
-              return `<div class="bar-item"><span class="bar-label ${sc.status==='100%'?'badge badge-100':'badge badge-'+sc.status}">${sc.status==='100%'?'💯 100%':sc.status}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><span class="bar-val">${sc.cnt}</span></div>`;
+              return `<div class="bar-item"><span class="bar-label ${sc.status==='100%'?'badge badge-100':sc.status==='no-ending'?'badge badge-no-ending':'badge badge-'+sc.status}">${statusLabel(sc.status)}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><span class="bar-val">${sc.cnt}</span></div>`;
             }).join('')}
           </div>
         </div>
@@ -984,14 +1450,31 @@ export async function renderStats() {
 export async function renderWishlist() {
   const items    = await DB.getWishlist(_user);
   const settings = await DB.getAllSettings(_user);
-  const sorted   = [...items].sort((a,b)=>(a.priority||2)-(b.priority||2)||a.title.localeCompare(b.title));
+  const savedSort = localStorage.getItem(`gt_wish_sort_${_user}`) || 'priority';
+
+  function sortItems(arr, by) {
+    return [...arr].sort((a,b) => {
+      if (by === 'priority') return (a.priority||2)-(b.priority||2) || a.title.localeCompare(b.title);
+      if (by === 'title')    return a.title.localeCompare(b.title);
+      if (by === 'price')    return parseFloat(a.price_current)||999 - (parseFloat(b.price_current)||999);
+      if (by === 'sale')     return (b.on_sale?1:0)-(a.on_sale?1:0);
+      return 0;
+    });
+  }
+  const sorted = sortItems(items, savedSort);
 
   main().innerHTML = `
     <div class="page-header">
       <h1>Wishlist</h1>
-      <div style="display:flex;gap:.5rem">
-        <button class="btn-outline" id="refreshPricesBtn">↻ Update Prices</button>
-        <button class="btn-primary" id="openWishModal">+ Add to Wishlist</button>
+      <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+        <select class="input" id="wishSortSelect" style="max-width:140px">
+          <option value="priority"${savedSort==='priority'?' selected':''}>By Priority</option>
+          <option value="title"${savedSort==='title'?' selected':''}>A–Z</option>
+          <option value="price"${savedSort==='price'?' selected':''}>By Price</option>
+          <option value="sale"${savedSort==='sale'?' selected':''}>On Sale First</option>
+        </select>
+        <button class="btn-outline" id="refreshPricesBtn">↻ Prices</button>
+        <button class="btn-primary" id="openWishModal">+ Add</button>
       </div>
     </div>
 
@@ -1073,8 +1556,12 @@ export async function renderWishlist() {
             ${(item.price_current||item.price_low) ? `
             <div class="wish-price-row">
               ${item.price_current ? `<span class="wish-price-current${item.on_sale?' on-sale':''}">${h(item.price_current)}</span>` : ''}
+              ${item.on_sale ? '<span class="wish-price-auto-badge">SALE</span>' : ''}
               ${item.price_low    ? `<span class="wish-price-low">Low: ${h(item.price_low)}</span>` : ''}
               ${item.price_updated ? `<span class="wish-price-date">Updated ${fmtDate(item.price_updated)}</span>` : ''}
+            </div>` : item.steam_appid ? `
+            <div class="wish-price-row">
+              <span class="wish-price-loading" id="wish-price-${h(item.id)}">↻ Loading price…</span>
             </div>` : ''}
             <div class="wish-actions">
               <button class="btn-xs" data-edit-price="${item.id}"
@@ -1093,6 +1580,39 @@ export async function renderWishlist() {
   document.getElementById('cancelWish').onclick     = () => closeModal('wishModal');
   document.getElementById('closePriceModal').onclick = () => closeModal('priceModal');
   document.getElementById('cancelPrice').onclick    = () => closeModal('priceModal');
+
+  // Section 3: Auto-fetch prices for items that have a steam_appid but no price yet
+  const missingPriceItems = items.filter(i => i.steam_appid && !i.price_current);
+  if (missingPriceItems.length) {
+    (async () => {
+      for (const item of missingPriceItems) {
+        const el = document.getElementById(`wish-price-${item.id}`);
+        try {
+          const price = await fetchSteamPrice(item.steam_appid);
+          if (price) {
+            item.price_current = `£${price.current}`;
+            item.on_sale       = price.on_sale;
+            item.price_updated = todayISO();
+            await DB.putWishlistItem(_user, item);
+            if (el) {
+              el.textContent = `£${price.current}${price.on_sale ? ' 🔥 SALE' : ''}`;
+              el.className   = `wish-price-current${price.on_sale ? ' on-sale' : ''}`;
+            }
+          } else {
+            if (el) el.textContent = '';
+          }
+        } catch(e) {
+          if (el) el.textContent = '';
+        }
+      }
+    })();
+  }
+
+  // Sort preference (Section 1.1)
+  document.getElementById('wishSortSelect')?.addEventListener('change', e => {
+    localStorage.setItem(`gt_wish_sort_${_user}`, e.target.value);
+    renderWishlist();
+  });
 
   // Refresh prices for Steam games
   document.getElementById('refreshPricesBtn').onclick = async () => {
@@ -1116,19 +1636,25 @@ export async function renderWishlist() {
     renderWishlist();
   };
 
-  // Wishlist autocomplete
+  // Wishlist autocomplete — Steam-first so prices work
   const wishSettings = await DB.getAllSettings(_user);
   new Autocomplete({
     input: document.getElementById('wishSearch'),
     dropdown: document.getElementById('wishAcDrop'),
     status: document.getElementById('wishStatus'),
-    onSearch: q => searchGames(q, wishSettings),
+    onSearch: q => searchGamesSteamFirst(q, wishSettings),
     onSelect: item => {
-      document.querySelector('#wishForm [name="title"]').value   = item.title||'';
+      document.querySelector('#wishForm [name="title"]').value    = item.title||'';
       document.querySelector('#wishForm [name="platform"]').value = item.platform||'';
       document.getElementById('wishCoverUrl').value = item.cover_url||'';
-      if (item.steam_appid) document.getElementById('wishAppId').value = item.steam_appid;
-      document.getElementById('wishStatus').textContent = `✓ ${item.title}`;
+      // Always fill steam_appid if available — required for price tracking
+      if (item.steam_appid) {
+        document.getElementById('wishAppId').value = item.steam_appid;
+        document.getElementById('wishStatus').textContent = `✓ ${item.title} · Steam ID: ${item.steam_appid} (prices will auto-load)`;
+      } else {
+        document.getElementById('wishAppId').value = '';
+        document.getElementById('wishStatus').textContent = `✓ ${item.title} · No Steam ID — prices unavailable`;
+      }
     }
   });
 
@@ -1309,31 +1835,34 @@ export async function renderProfile() {
     <div class="form-card">
       <h3 style="font-size:.9rem;font-weight:700;margin-bottom:1rem">Data</h3>
       <div style="display:flex;gap:.75rem;flex-wrap:wrap">
-        <button class="btn-outline" id="exportBtn">Export JSON</button>
-        <label class="btn-outline" style="cursor:pointer">Import JSON<input type="file" id="importFile" accept=".json" style="display:none"></label>
-        <button class="btn-xs btn-xs-danger" id="switchProfileBtn">Switch Profile</button>
+        ${_viewOnly ? `<div class="view-only-banner">👁 View-only mode — no changes can be made</div>` : `
+          <button class="btn-outline" id="exportBtn">Export JSON</button>
+          <button class="btn-outline" id="exportViewOnlyBtn">👁 Export View-Only</button>
+          <label class="btn-outline" style="cursor:pointer">Import JSON<input type="file" id="importFile" accept=".json" style="display:none"></label>
+          <button class="btn-xs btn-xs-danger" id="switchProfileBtn">Switch Profile</button>
+        `}
       </div>
     </div>`;
 
-  // Profile picture
+  // Section 4: Profile picture with crop modal
   document.getElementById('editPicBtn').onclick = () => document.getElementById('picFilePicker').click();
   document.getElementById('picFilePicker').onchange = async e => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async ev => {
-      const dataUrl = ev.target.result;
-      await DB.updateProfilePic(_user, dataUrl);
+    // Section 4: open crop modal instead of direct save
+    openCropModal(file, async dataUrl => {
+      const ts = new Date().toISOString();
+      await DB.updateProfilePic(_user, dataUrl, ts);
       await onDataChanged();
-      // Update avatar in nav and profile page
       document.getElementById('profilePicWrap').innerHTML =
         `<img src="${h(dataUrl)}" class="profile-banner-avatar-img">` +
         `<button class="profile-pic-edit" title="Change photo" id="editPicBtn">📷</button>`;
       document.getElementById('navAvatar').innerHTML = `<img src="${h(dataUrl)}" class="nav-avatar-img">`;
       document.getElementById('editPicBtn').onclick = () => document.getElementById('picFilePicker').click();
       toast('Profile picture updated!','success');
-    };
-    reader.readAsDataURL(file);
+    });
+    // Reset file picker so same file can be picked again
+    e.target.value = '';
   };
 
   // Favorites — click slot to open search
@@ -1390,6 +1919,8 @@ export async function renderProfile() {
     renderProfile();
   };
 
+  if (_viewOnly) return; // no handlers needed for view-only
+
   // Export / Import
   document.getElementById('exportBtn').onclick = async () => {
     const data = await DB.exportProfile(_user);
@@ -1400,7 +1931,18 @@ export async function renderProfile() {
     toast('Export downloaded!','success');
   };
 
-  document.getElementById('importFile').addEventListener('change', async e => {
+  // Section 7: View-only export
+  document.getElementById('exportViewOnlyBtn').onclick = async () => {
+    const data = await DB.exportProfile(_user, true); // viewOnly=true
+    data.viewOnly = true;
+    const blob = new Blob([JSON.stringify(data,null,2)], { type:'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = Object.assign(document.createElement('a'),{href:url,download:`gametracker_${_user}_viewonly_${todayISO()}.json`});
+    a.click(); URL.revokeObjectURL(url);
+    toast('View-only profile exported! Share this file with others.','success');
+  };
+
+  document.getElementById('importFile')?.addEventListener('change', async e => {
     const file = e.target.files[0];
     if (!file) return;
     try {
@@ -1410,7 +1952,8 @@ export async function renderProfile() {
     } catch(err) { toast('Import failed — invalid file','error'); }
   });
 
-  document.getElementById('switchProfileBtn').onclick = () => _nav('__profiles__');
+  const switchBtn = document.getElementById('switchProfileBtn');
+  if (switchBtn) switchBtn.onclick = () => _nav('__profiles__');
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1424,13 +1967,16 @@ export async function renderSettings() {
   const igdbCid = s.igdb_client_id||'';
   const igdbCs  = s.igdb_client_secret||'';
   const syncOn  = s.sync_enabled==='true';
+  const ratingDisplay = s.rating_display||'stars';
+  const logDefaultEnd = s.log_default_end_to_now !== 'false';
 
   main().innerHTML = `
     <div class="page-header"><h1>Settings</h1></div>
     <div class="settings-layout">
 
+      <!-- Appearance -->
       <div class="form-card">
-        <div class="settings-section-title">Appearance</div>
+        <div class="settings-section-title">🎨 Appearance</div>
         <div class="form-group mb-lg">
           <label>Theme</label>
           <div class="theme-toggle-group">
@@ -1453,12 +1999,40 @@ export async function renderSettings() {
         <button class="btn-primary" id="saveAppearance">Save Appearance</button>
       </div>
 
+      <!-- Section 10: Rating display -->
+      <div class="form-card">
+        <div class="settings-section-title">⭐ Ratings &amp; Reviews</div>
+        <div class="form-group mb-md">
+          <label>Rating display style</label>
+          <div class="theme-toggle-group">
+            <div class="theme-option${ratingDisplay==='stars'?' active':''}" data-rating="stars" id="ratingStars">★ Stars</div>
+            <div class="theme-option${ratingDisplay==='numeric'?' active':''}" data-rating="numeric" id="ratingNumeric">4.5 / 5 Numeric</div>
+          </div>
+          <p class="label-hint" style="margin-top:.4rem">Stars uses Letterboxd-style display. Numeric shows the raw value.</p>
+        </div>
+        <button class="btn-primary" id="saveRatingDisplay">Save</button>
+      </div>
+
+      <!-- Section 10: Logging behaviour -->
+      <div class="form-card">
+        <div class="settings-section-title">⏱ Logging Behaviour</div>
+        <div class="form-group mb-md">
+          <label class="checkbox-row">
+            <input type="checkbox" id="logDefaultEndNow" ${logDefaultEnd?'checked':''}>
+            <span>Auto-fill end time with current time when opening log modal</span>
+          </label>
+          <p class="label-hint" style="margin-top:.3rem">Useful if you always log sessions immediately after finishing.</p>
+        </div>
+        <button class="btn-primary" id="saveLoggingSettings">Save</button>
+      </div>
+
+      <!-- Cloud sync -->
       <div class="form-card">
         <div class="settings-section-title">☁️ Cloud Sync</div>
         <p style="font-size:.85rem;color:var(--text2);margin-bottom:1rem;line-height:1.6">
           Sync across devices anywhere — including GitHub Pages.<br>
           Requires a free <a href="https://workers.cloudflare.com" target="_blank">Cloudflare Worker</a>.
-          See <strong>cloudflare-worker.js</strong> in the project files for 5-minute setup instructions.
+          See <strong>cloudflare-worker.js</strong> for 5-minute setup.
         </p>
         <div class="form-group mb-md">
           <label>Worker URL</label>
@@ -1482,8 +2056,9 @@ export async function renderSettings() {
         </div>
       </div>
 
+      <!-- IGDB -->
       <div class="form-card igdb-card">
-        <div class="settings-section-title">Game Database — IGDB</div>
+        <div class="settings-section-title">🎮 Game Database — IGDB</div>
         <div class="igdb-status-banner ${igdbCid?'igdb-connected':'igdb-disconnected'}">
           <span class="igdb-dot"></span>
           <div>
@@ -1517,11 +2092,58 @@ export async function renderSettings() {
             <button type="button" class="secret-toggle" id="toggleSecret">👁</button>
           </div>
         </div>
+
+        <!-- Wishlist search source override -->
+        <div class="form-group mb-md" style="padding-top:.75rem;border-top:1px solid var(--border)">
+          <label>Wishlist search source</label>
+          <div class="theme-toggle-group" style="margin-top:.4rem">
+            <div class="theme-option${(s.wishlist_search_source||'steam')==='steam'?' active':''}" data-wsource="steam" id="wsourceSteam">🟦 Steam first</div>
+            <div class="theme-option${s.wishlist_search_source==='igdb'?' active':''}" data-wsource="igdb" id="wsourceIGDB">🟣 IGDB first</div>
+            <div class="theme-option${s.wishlist_search_source==='both'?' active':''}" data-wsource="both" id="wsourceBoth">Both</div>
+          </div>
+          <p class="label-hint" style="margin-top:.4rem"><strong>Steam first</strong> (default) — ensures Steam App IDs are captured so prices auto-load.<br><strong>IGDB first</strong> — for console exclusives not on Steam (no price tracking).</p>
+        </div>
+
         <div style="display:flex;gap:.75rem;flex-wrap:wrap">
           ${igdbCid?`<button class="btn-xs btn-xs-danger" id="clearIgdb">Disconnect</button>`:''}
-          <button class="btn-primary" id="saveIgdb">Save IGDB Credentials</button>
+          <button class="btn-primary" id="saveIgdb">Save IGDB Settings</button>
         </div>
       </div>
+
+      <!-- Section 10: Debug Tools -->
+      <div class="form-card">
+        <div class="settings-section-title">🔧 Debug Tools</div>
+        <p style="font-size:.85rem;color:var(--text2);margin-bottom:1rem;line-height:1.6">
+          Tools for fixing or refreshing library data. These only update the specific field — other data is not touched.
+        </p>
+
+        <div class="debug-tool-row">
+          <div>
+            <strong>Re-import all descriptions</strong>
+            <p class="label-hint">Re-fetches game descriptions from IGDB or Steam for every game in your library. Only overwrites the description field — your notes, ratings, and play data are safe.</p>
+          </div>
+          <button class="btn-outline" id="reimportDescBtn">Run</button>
+        </div>
+        <div id="reimportDescStatus" style="font-size:.8rem;color:var(--text3);margin-top:.5rem;display:none"></div>
+
+        <div class="debug-tool-row" style="margin-top:1.25rem">
+          <div>
+            <strong>Force sync push</strong>
+            <p class="label-hint">Manually push all your current data to the cloud sync relay right now.</p>
+          </div>
+          <button class="btn-outline" id="forceSyncPushBtn">Push</button>
+        </div>
+        <div id="forceSyncStatus" style="font-size:.8rem;color:var(--text3);margin-top:.5rem;display:none"></div>
+
+        <div class="debug-tool-row" style="margin-top:1.25rem">
+          <div>
+            <strong>Export all data</strong>
+            <p class="label-hint">Download a full JSON backup of your library, sessions, wishlist, and settings.</p>
+          </div>
+          <button class="btn-outline" id="exportDataBtn">Export JSON</button>
+        </div>
+      </div>
+
     </div>`;
 
   // Theme
@@ -1552,7 +2174,29 @@ export async function renderSettings() {
     document.documentElement.style.setProperty('--accent',c);
     document.documentElement.style.setProperty('--accent2',c+'cc');
     document.documentElement.setAttribute('data-theme',t);
+    const metaTheme = document.getElementById('themeColorMeta');
+    if (metaTheme) metaTheme.content = t === 'light' ? '#f2f1ed' : '#0e0e10';
     toast('Appearance saved!','success');
+  });
+
+  // Section 10: Rating display
+  document.querySelectorAll('[data-rating]').forEach(el => {
+    el.addEventListener('click', () => {
+      document.querySelectorAll('[data-rating]').forEach(e=>e.classList.remove('active'));
+      el.classList.add('active');
+    });
+  });
+  document.getElementById('saveRatingDisplay').addEventListener('click', async () => {
+    const val = document.querySelector('[data-rating].active')?.dataset.rating || 'stars';
+    await DB.setSetting(_user, 'rating_display', val);
+    toast('Rating display saved!', 'success');
+  });
+
+  // Section 10: Logging settings
+  document.getElementById('saveLoggingSettings').addEventListener('click', async () => {
+    const checked = document.getElementById('logDefaultEndNow').checked;
+    await DB.setSetting(_user, 'log_default_end_to_now', checked ? 'true' : 'false');
+    toast('Logging settings saved!', 'success');
   });
 
   // Sync toggle label
@@ -1585,13 +2229,22 @@ export async function renderSettings() {
     renderSettings();
   };
 
-  // IGDB
+  // IGDB + wishlist source
+  document.querySelectorAll('[data-wsource]').forEach(el => {
+    el.addEventListener('click', () => {
+      document.querySelectorAll('[data-wsource]').forEach(e=>e.classList.remove('active'));
+      el.classList.add('active');
+    });
+  });
+
   document.getElementById('saveIgdb').addEventListener('click', async () => {
-    const cid = document.getElementById('igdbCid').value.trim();
-    const cs  = document.getElementById('igdbCs').value.trim();
+    const cid    = document.getElementById('igdbCid').value.trim();
+    const cs     = document.getElementById('igdbCs').value.trim();
+    const wsrc   = document.querySelector('[data-wsource].active')?.dataset.wsource || 'steam';
     await DB.setSetting(_user,'igdb_client_id',cid);
     await DB.setSetting(_user,'igdb_client_secret',cs);
-    toast(cid?'IGDB credentials saved!':'IGDB credentials cleared','success');
+    await DB.setSetting(_user,'wishlist_search_source', wsrc);
+    toast(cid?'IGDB settings saved!':'IGDB credentials cleared','success');
     renderSettings();
   });
 
@@ -1615,5 +2268,56 @@ export async function renderSettings() {
     const r   = await testIGDB(cid,cs);
     el.className = `igdb-test-result ${r.ok?'igdb-test-ok':'igdb-test-fail'}`;
     el.textContent = r.ok ? `✓ Connected — ${r.count} results for "Fortnite"` : `✗ ${r.error}`;
+  });
+
+  // Section 10 + Section 1: Re-import descriptions debug tool
+  document.getElementById('reimportDescBtn').addEventListener('click', async () => {
+    const statusEl = document.getElementById('reimportDescStatus');
+    statusEl.style.display='block'; statusEl.style.color='var(--text3)';
+    statusEl.textContent='⏳ Starting…';
+    const settings = await DB.getAllSettings(_user);
+    const games = await DB.getGames(_user);
+    let updated = 0, failed = 0;
+    for (const game of games) {
+      try {
+        statusEl.textContent = `⏳ ${updated+failed+1}/${games.length} — ${game.title}`;
+        const desc = await fetchDescriptionForGame(game, settings);
+        if (desc) {
+          await DB.putGame(_user, { ...game, description: desc, updatedAt: new Date().toISOString() });
+          updated++;
+        } else { failed++; }
+        await new Promise(r => setTimeout(r, 300));
+      } catch { failed++; }
+    }
+    await onDataChanged();
+    statusEl.textContent = `✓ Done — ${updated} updated, ${failed} not found or no description.`;
+    statusEl.style.color = updated > 0 ? 'var(--green)' : 'var(--yellow)';
+  });
+
+  // Section 10: Force sync push
+  document.getElementById('forceSyncPushBtn').addEventListener('click', async () => {
+    const statusEl = document.getElementById('forceSyncStatus');
+    statusEl.style.display='block'; statusEl.textContent='⏳ Pushing…'; statusEl.style.color='var(--text3)';
+    try {
+      await onDataChanged();
+      statusEl.textContent = '✓ Push complete!'; statusEl.style.color = 'var(--green)';
+    } catch(e) {
+      statusEl.textContent = `✗ ${e.message}`; statusEl.style.color = 'var(--red)';
+    }
+  });
+
+  // Section 10: Export all data
+  document.getElementById('exportDataBtn').addEventListener('click', async () => {
+    const [games, sessions, wishlist, favorites, settings2, profile] = await Promise.all([
+      DB.getGames(_user), DB.getSessions(_user), DB.getWishlist(_user),
+      DB.getFavorites(_user), DB.getAllSettings(_user), DB.getProfile(_user),
+    ]);
+    const data = { version:2, exported: new Date().toISOString(), username: _user, games, sessions, wishlist, favorites, settings: settings2, profile };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `gametracker-${_user}-${todayISO()}.json`;
+    a.click(); URL.revokeObjectURL(url);
+    toast('Data exported!', 'success');
   });
 }
