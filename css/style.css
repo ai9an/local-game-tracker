@@ -238,6 +238,7 @@ textarea.input { resize: vertical; min-height: 80px; }
 /* ── BADGES ─────────────────────────────────────────── */
 .badge { display: inline-block; font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: .18rem .55rem .22rem; border-radius: 4px; line-height: 1.4; }
 .badge-playing   { background: rgba(74,158,255,.18); color: var(--blue); }
+.badge-played    { background: rgba(156,106,222,.18); color: #9c6ade; }
 .badge-completed { background: rgba(76,175,125,.18); color: var(--green); }
 .badge-backlog   { background: rgba(136,136,152,.18); color: var(--text3); }
 .badge-paused    { background: rgba(240,184,64,.18);  color: var(--yellow); }
@@ -466,11 +467,17 @@ textarea.input { resize: vertical; min-height: 80px; }
 @media (max-width: 700px) { .recent-grid { grid-template-columns: repeat(2,1fr); } }
 .recent-card { text-decoration: none; color: var(--text); display: flex; flex-direction: column; gap: .5rem; transition: transform .15s; cursor: pointer; }
 .recent-card:hover { transform: translateY(-3px); }
-.recent-cover { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: var(--radius-lg); border: 1px solid var(--border); display: block; }
+.recent-poster-wrap { position: relative; border-radius: var(--radius-lg); overflow: hidden; aspect-ratio: 2/3; background: var(--bg2); border: 1px solid var(--border); }
+.recent-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+.recent-overlay {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  background: linear-gradient(to top, rgba(0,0,0,.85) 0%, rgba(0,0,0,.4) 60%, transparent 100%);
+  padding: .5rem .4rem .35rem;
+  display: flex; flex-direction: column; gap: .1rem;
+}
+.recent-overlay .recent-title { color: #fff; font-size: .72rem; font-weight: 700; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-overlay .recent-hours { color: rgba(255,255,255,.7); font-family: var(--font-mono); font-size: .65rem; }
 .recent-placeholder { width: 100%; aspect-ratio: 2/3; border-radius: var(--radius-lg); background: var(--bg3); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 1.4rem; font-weight: 800; color: var(--text3); font-family: var(--font-mono); }
-.recent-info { display: flex; flex-direction: column; gap: .2rem; }
-.recent-title { font-size: .82rem; font-weight: 700; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recent-hours { font-family: var(--font-mono); font-size: .72rem; color: var(--accent); line-height: 1.4; }
 
 /* ── SETTINGS PAGE ──────────────────────────────────── */
 .settings-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start; }
@@ -1059,3 +1066,204 @@ img[src=""]       { display: none !important; }
 
 /* ── Section 7: Hours field subtext ─────────────── */
 .hours-subtext { font-size: .72rem; color: var(--text3); margin-top: .2rem; }
+
+/* ═══════════════════════════════════════════════════
+   SECTIONS 1–6 NEW STYLES (v7)
+═══════════════════════════════════════════════════ */
+
+/* ── Section 1: badge-played ─────────────────────── */
+.badge-played { background: rgba(156,106,222,.18); color: #9c6ade; }
+
+/* ── Section 2 & 3: Game nav bar ─────────────────── */
+.game-nav-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: .6rem 0 .4rem; margin-bottom: .5rem; flex-wrap: wrap; gap: .5rem;
+}
+.game-nav-back {
+  font-size: .82rem; padding: .3rem .8rem;
+}
+.game-nav-arrows {
+  display: flex; align-items: center; gap: .5rem;
+}
+.game-nav-arrow {
+  font-size: .82rem; padding: .3rem .7rem; min-width: 60px;
+}
+.game-nav-arrow.disabled {
+  opacity: .35; cursor: not-allowed;
+}
+.game-nav-position {
+  font-size: .78rem; color: var(--text3); min-width: 3rem; text-align: center;
+}
+
+/* ── Section 4: Rating curve ─────────────────────── */
+.rating-curve {
+  display: flex; align-items: flex-end; gap: .4rem;
+  padding: .5rem 0 0; /* No fixed height — bars drive the height */
+}
+.rating-curve-col {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: .2rem;
+}
+.rating-curve-bar-wrap {
+  width: 100%; display: flex; align-items: flex-end;
+  /* No flex:1 / no min-height — the bar itself sets the height */
+}
+.rating-curve-bar {
+  width: 100%; background: var(--accent); border-radius: 3px 3px 0 0;
+  min-height: 3px; transition: height .5s cubic-bezier(.4,0,.2,1);
+}
+.rating-curve-count {
+  font-size: .65rem; color: var(--text3); font-weight: 600;
+  min-height: .9rem; text-align: center;
+}
+.rating-curve-label {
+  font-size: .65rem; color: var(--text3); white-space: nowrap;
+}
+.section-sub {
+  font-size: .78rem; color: var(--text3); font-weight: 400;
+}
+
+/* ── Section 5: Average rating display ───────────── */
+.rating-label {
+  font-size: .72rem; color: var(--text3); margin-right: .2rem;
+}
+.avg-rating-display .rating-label { color: var(--blue); }
+.avg-rating-display { opacity: .85; }
+
+/* ── Mobile: game nav bar stacks ─────────────────── */
+@media (max-width: 540px) {
+  .game-nav-bar { flex-direction: column; align-items: flex-start; }
+  .game-nav-arrows { width: 100%; justify-content: space-between; }
+}
+
+/* ── KV Request Monitor (debug panel) ──────────────── */
+.kv-monitor-grid {
+  background: var(--bg3);
+  border-radius: 8px;
+  padding: .75rem 1rem;
+  font-size: .85rem;
+}
+.kv-stat-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: .25rem 0; border-bottom: 1px solid var(--border);
+}
+.kv-stat-row:last-child { border-bottom: none; }
+.kv-stat-label { color: var(--text3); }
+.kv-stat-val   { font-weight: 600; }
+.kv-proj-label {
+  font-size: .8rem; color: var(--text2); margin-bottom: .25rem;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.kv-proj-pct { font-weight: 700; font-size: .75rem; }
+.kv-bar-track {
+  height: 6px; background: var(--bg2); border-radius: 3px; overflow: hidden;
+}
+.kv-bar-fill {
+  height: 100%; background: var(--accent); border-radius: 3px;
+  transition: width .4s ease;
+}
+.kv-bar-fill.kv-warn,  .kv-proj-pct.kv-warn  { background: var(--yellow); color: var(--yellow); }
+.kv-bar-fill.kv-danger,.kv-proj-pct.kv-danger { background: var(--red);    color: var(--red); }
+.kv-writes-val.kv-warn   { color: var(--yellow); }
+.kv-writes-val.kv-danger { color: var(--red); }
+
+/* ═══════════════════════════════════════════════════
+   v8 SECTION FIXES
+═══════════════════════════════════════════════════ */
+
+/* ── Section 3: Status badge readability on cards ── */
+.game-card-badges {
+  position: absolute; top: .45rem; left: .45rem;
+  display: flex; flex-direction: column; gap: .3rem;
+  z-index: 2;
+}
+/* Override every badge variant when it sits on a poster —
+   force solid dark pill so it reads on any background colour.
+   Specificity is intentionally high. */
+.game-card-badges .badge,
+.game-card-badges .badge.badge-playing,
+.game-card-badges .badge.badge-played,
+.game-card-badges .badge.badge-completed,
+.game-card-badges .badge.badge-100,
+.game-card-badges .badge.badge-backlog,
+.game-card-badges .badge.badge-paused,
+.game-card-badges .badge.badge-dropped,
+.game-card-badges .badge.sub-badge {
+  background: rgba(0, 0, 0, 0.72) !important;
+  color: #ffffff !important;
+  border: 1px solid rgba(255,255,255,.22) !important;
+  font-size: .6rem !important;
+  font-weight: 700 !important;
+  padding: .15rem .4rem !important;
+  border-radius: 4px !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,.6) !important;
+  text-shadow: 0 1px 2px rgba(0,0,0,.9) !important;
+  letter-spacing: .02em !important;
+  line-height: 1.4 !important;
+}
+
+/* ── Section 7: Replay badge & card indicator ────── */
+.badge-replay { background: rgba(74,222,128,.18); color: #4ade80; }
+.replay-badge {
+  font-size: .65rem; color: #4ade80; font-weight: 600;
+  padding: .1rem 0; letter-spacing: .02em;
+}
+
+/* ── Section 10: Game detail ratings block ───────── */
+.game-hero { display: flex; gap: 2rem; align-items: flex-start; }
+.game-hero-cover-col {
+  display: flex; flex-direction: column; align-items: center; gap: 1rem;
+  flex-shrink: 0;
+}
+.game-ratings-block {
+  width: 100%; background: var(--bg2); border-radius: var(--radius);
+  padding: .75rem; display: flex; flex-direction: column; gap: .5rem;
+}
+.game-hours-display {
+  font-size: 1.05rem; font-weight: 700; color: var(--text1);
+  text-align: center; padding-bottom: .35rem;
+  border-bottom: 1px solid var(--border);
+}
+.game-rating-row {
+  display: flex; align-items: center; gap: .4rem; flex-wrap: wrap;
+}
+.game-rating-label {
+  font-size: .72rem; color: var(--text3); min-width: 4rem;
+}
+.game-rating-stars {
+  font-size: 1.2rem; letter-spacing: .06em;
+  color: var(--accent); /* always use accent colour for star chars */
+}
+.game-rating-num { font-size: .8rem; color: var(--text3); }
+.game-rating-row-avg .game-rating-label { color: var(--blue); }
+.game-rating-row-avg .game-rating-stars { color: var(--blue); }
+
+/* Stars in library card meta lines also use accent */
+.game-card-meta { color: var(--text2); }
+
+/* ── Section 11: Progress display ───────────────── */
+/* (uses existing game-meta-item — no extra CSS needed) */
+
+/* ── Section 12: Fav cover sharpness ────────────── */
+.fav-slot .fav-cover {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+  image-rendering: -webkit-optimize-contrast;
+}
+
+/* ── Mobile: ratings block stacks below hero ─────── */
+@media (max-width: 640px) {
+  .game-hero { flex-direction: column; }
+  .game-hero-cover-col { width: 100%; align-items: flex-start; flex-direction: row; flex-wrap: wrap; }
+  .game-ratings-block { flex: 1; min-width: 160px; }
+}
+
+/* ── IGDB worker-required warning banner ────────── */
+.igdb-warning-banner {
+  background: rgba(240,164,50,.12);
+  border: 1px solid rgba(240,164,50,.4);
+  border-radius: var(--radius);
+  color: var(--yellow, #f0a432);
+  font-size: .8rem;
+  line-height: 1.55;
+  padding: .65rem .85rem;
+  margin-bottom: 1rem;
+}

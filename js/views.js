@@ -7,7 +7,7 @@ import { h, fmtHours, fmtStars, fmtDate, fmtPrice, todayISO, nowTimeHHMM, parseD
          Autocomplete, attachDurationCalc, setupCoverPreview,
          renderStarRating, openCropModal, renderPlatformCheckboxes, getSelectedPlatforms,
          PLATFORM_OPTIONS } from './ui.js';
-import { onDataChanged } from './sync.js';
+import { onDataChanged, getKVStats } from './sync.js';
 
 let _user    = null;
 let _nav     = null;
@@ -21,34 +21,120 @@ export function init(username, navigateFn, viewOnly = false) {
 
 function main() { return document.getElementById('app'); }
 
+/* ── Library state — persists across game detail views ── */
+// Section 2: scroll + filter restoration
+// Section 3: ordered game list for prev/next navigation
+const _libState = {
+  scrollY:    0,
+  filter:     'all',
+  sortBy:     null,
+  query:      '',
+  orderedIds: [],
+};
+
+// Called by app.js navigate() before leaving a game page
+export function saveLibraryScroll(y) { _libState.scrollY = y; }
+
+/* ── Section 13: Auto-status change ─────────────────
+   If enabled in settings, games with status 'playing' that have
+   had no session logged in the last 30 days are changed to 'played'.
+   Guard: only runs if the user has at least 5 sessions total AND has
+   been logging for at least 14 days — avoids false-positives for new users. */
+async function _autoStatusCheck() {
+  try {
+    const settings = await DB.getAllSettings(_user);
+    if (settings.auto_status_inactive !== 'true') return;
+
+    const sessions = await DB.getSessions(_user);
+    if (sessions.length < 5) return; // not enough history
+
+    // Earliest session date — must be logging for at least 14 days
+    const earliest = sessions.map(s => s.date).sort()[0];
+    if (!earliest) return;
+    const daysSinceFirst = (Date.now() - new Date(earliest)) / 86400000;
+    if (daysSinceFirst < 14) return;
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 30);
+    const cutoffISO = cutoff.toISOString().slice(0, 10);
+
+    // Build a map: game_id → latest session date
+    const latestByGame = {};
+    for (const s of sessions) {
+      if (!latestByGame[s.game_id] || s.date > latestByGame[s.game_id]) {
+        latestByGame[s.game_id] = s.date;
+      }
+    }
+
+    const games = await DB.getGames(_user);
+    let changed = 0;
+    for (const g of games) {
+      if (normStatus(g.status) !== 'playing') continue;
+      const last = latestByGame[g.id];
+      if (!last || last < cutoffISO) {
+        await DB.putGame(_user, { ...g, status: 'played', updatedAt: new Date().toISOString() });
+        changed++;
+      }
+    }
+    if (changed > 0) {
+      await onDataChanged();
+      toast(`${changed} game${changed!==1?'s':''} moved from Playing → Played (inactive 30+ days)`, 'info');
+    }
+  } catch(e) { /* silently ignore */ }
+}
+
+/* ── Section 12: High-res cover URL for favourites ─── */
+function hiResCover(game) {
+  const url = game.cover_url || '';
+  // IGDB: upgrade t_cover_big → t_cover_big_2x
+  if (url.includes('images.igdb.com') && url.includes('t_cover_big/')) {
+    return url.replace('t_cover_big/', 't_cover_big_2x/');
+  }
+  // Steam: library_600x900.jpg is already high-res; try _2x variant, fall back to original
+  if (url.includes('cdn.cloudflare.steamstatic.com') && url.includes('library_600x900.jpg')) {
+    return url; // Steam 600x900 is already crisp at typical display sizes
+  }
+  return url;
+}
+
 /* ── Status helpers ───────────────────────────────── */
-// Section 4: Updated statuses with renamed 'completed' and new 'no-ending'
-const ALL_STATUSES = ['playing','completed','no-ending','100%','backlog','paused','dropped'];
+// Section 1: 'played' added, 'completed' label restored, backwards compat for old label
+const ALL_STATUSES = ['playing','played','completed','100%','backlog','paused','dropped'];
 
 const STATUS_LABELS = {
   'playing':   'Playing',
-  'completed': 'Completed your main goal',
-  'no-ending': 'Game has no ending',
-  '100%':      '💯 100% Completed',
+  'played':    'Played',
+  'completed': 'Completed',
+  '100%':      '100% Completed',    // Section 8: removed 💯 emoji
   'backlog':   'Backlog',
   'paused':    'Paused',
   'dropped':   'Dropped',
 };
 
+// Section 6: migrate legacy 'no-ending' status to 'played'
+function normStatus(s) {
+  if (!s) return 'backlog';
+  if (s === 'no-ending' || s === 'Game has no ending') return 'played';
+  if (s === 'Completed your main goal') return 'completed';
+  return s;
+}
+
 function statusLabel(status) {
-  return STATUS_LABELS[status] || status;
+  const s = normStatus(status);
+  return STATUS_LABELS[s] || s;
 }
 
 function statusBadge(status) {
-  const cls = status === '100%' ? 'badge-100' : status === 'no-ending' ? 'badge-no-ending' : `badge-${status}`;
-  const lbl = STATUS_LABELS[status] || status;
-  return `<span class="badge ${cls}">${lbl}</span>`;
+  const s   = normStatus(status);
+  const cls = s === '100%' ? 'badge-100' : `badge-${s}`;
+  return `<span class="badge ${cls}">${statusLabel(status)}</span>`;
 }
 
 function completionIcon(status) {
-  if (status === '100%')      return '💯';
-  if (status === 'completed') return '✅';
-  if (status === 'no-ending') return '♾️';
+  const s = normStatus(status);
+  if (s === '100%')      return '✔';
+  if (s === 'completed') return '✅';
+  if (s === 'played')    return '🎮';
   return '';
 }
 
@@ -56,6 +142,9 @@ function completionIcon(status) {
    DASHBOARD
 ═══════════════════════════════════════════════════ */
 export async function renderDashboard() {
+  // Section 13: auto-change stale "playing" games to "played" (if setting enabled)
+  await _autoStatusCheck();
+
   const games    = await DB.getGames(_user);
   const sessions = await DB.getSessions(_user);
   const lib      = games.filter(g => g.status !== 'wishlist');
@@ -145,8 +234,20 @@ export async function renderDashboard() {
 /* ═══════════════════════════════════════════════════
    LIBRARY
 ═══════════════════════════════════════════════════ */
-export async function renderLibrary() {
+export async function renderLibrary(restoreState = false) {
   const games = (await DB.getGames(_user)).filter(g=>g.status!=='wishlist');
+
+  // Section 2: restore or init filter/sort state
+  const savedSort = localStorage.getItem(`gt_lib_sort_${_user}`) || 'title';
+  if (!restoreState) {
+    _libState.filter  = 'all';
+    _libState.query   = '';
+    _libState.sortBy  = savedSort;
+    _libState.scrollY = 0;
+  }
+  let filter = _libState.filter;
+  let sortBy = _libState.sortBy || savedSort;
+  let query  = _libState.query;
 
   main().innerHTML = `
     <div class="page-header">
@@ -154,21 +255,24 @@ export async function renderLibrary() {
       <button class="btn-primary" data-nav="add">+ Add Game</button>
     </div>
     <div class="filter-bar">
-      ${['all',...ALL_STATUSES].map(s=>`<button class="filter-pill${s==='all'?' active':''}" data-status="${s}">${s==='all'?'All':statusLabel(s)}</button>`).join('')}
-      <input type="search" class="input filter-search" id="libSearch" placeholder="Search…">
+      ${['all',...ALL_STATUSES,'🔁replay'].map(s=>{
+        const isReplay = s==='🔁replay';
+        const label = isReplay ? '🔁 Replay' : (s==='all'?'All':statusLabel(s));
+        const active = isReplay ? filter==='🔁replay' : s===filter;
+        return `<button class="filter-pill${active?' active':''}" data-status="${s}">${label}</button>`;
+      }).join('')}
+      <input type="search" class="input filter-search" id="libSearch" placeholder="Search…" value="${h(query)}">
       <select class="input" id="libSort" style="max-width:150px">
         <option value="title">A–Z</option>
         <option value="hours">Most played</option>
         <option value="recent">Recently played</option>
         <option value="rating">Rating</option>
         <option value="added">Date added</option>
+        <option value="replay">Want to Replay</option>
       </select>
     </div>
     <div class="game-grid" id="gameGrid"></div>`;
 
-  let filter='all', sortBy=localStorage.getItem(`gt_lib_sort_${_user}`)||'title', query='';
-
-  // Restore saved sort
   const sortSelect = document.getElementById('libSort');
   if (sortSelect) sortSelect.value = sortBy;
 
@@ -178,15 +282,24 @@ export async function renderLibrary() {
       if (sortBy==='recent') return (b.last_played||'').localeCompare(a.last_played||'');
       if (sortBy==='rating') return (Number(b.rating)||0)-(Number(a.rating)||0);
       if (sortBy==='added')  return (b.date_added||'').localeCompare(a.date_added||'');
+      if (sortBy==='replay') return (b.want_to_replay?1:0)-(a.want_to_replay?1:0);
       return (a.title||'').localeCompare(b.title||'');
     });
   }
 
   function render() {
     let list = games;
-    if (filter!=='all') list = list.filter(g=>g.status===filter);
+    if (filter==='🔁replay') {
+      list = list.filter(g=>g.want_to_replay);
+    } else if (filter!=='all') {
+      list = list.filter(g=>normStatus(g.status)===filter);
+    }
     if (query) list = list.filter(g=>(g.title||'').toLowerCase().includes(query.toLowerCase()));
     list = sortGames(list);
+
+    // Section 3: keep ordered ids in sync for prev/next navigation
+    _libState.orderedIds = list.map(g => g.id);
+
     const grid = document.getElementById('gameGrid');
     if (!list.length) {
       grid.innerHTML=`<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">🔍</div><h3>No games found</h3><p>Try a different filter.</p></div>`;
@@ -210,6 +323,7 @@ export async function renderLibrary() {
         <div class="game-card-info">
           <div class="game-card-title">${h(g.title||'Unknown')}</div>
           <div class="game-card-meta">${fmtHours(g.total_hours)}${g.rating?` · ${fmtStars(g.rating)}`:''}</div>
+          ${g.want_to_replay?'<div class="replay-badge">🔁 Replay</div>':''}
         </div>
       </div>`;
     }).join('');
@@ -220,18 +334,46 @@ export async function renderLibrary() {
       document.querySelectorAll('.filter-pill').forEach(b=>b.classList.remove('active'));
       btn.classList.add('active');
       filter = btn.dataset.status;
+      _libState.filter = filter;
       render();
     });
   });
-  document.getElementById('libSearch').addEventListener('input', e => { query=e.target.value; render(); });
+  document.getElementById('libSearch').addEventListener('input', e => {
+    query = e.target.value;
+    _libState.query = query;
+    render();
+  });
   document.getElementById('libSort').addEventListener('change', e => {
-    sortBy=e.target.value;
+    sortBy = e.target.value;
+    _libState.sortBy = sortBy;
     localStorage.setItem(`gt_lib_sort_${_user}`, sortBy);
     render();
   });
-  render();
-}
 
+  render();
+
+  // ── Section 3: Scroll restoration ──────────────────────────────────────────
+  // Save scroll on mousedown (fires before navigate clears the page).
+  // Using mousedown instead of click prevents the scroll position being
+  // overwritten by the new page's scrollY=0 during the click event bubble.
+  document.getElementById('gameGrid')?.addEventListener('mousedown', () => {
+    _libState.scrollY = window.scrollY;
+  }, { passive: true });
+  // Also save on touchstart for mobile
+  document.getElementById('gameGrid')?.addEventListener('touchstart', () => {
+    _libState.scrollY = window.scrollY;
+  }, { passive: true });
+
+  if (restoreState && _libState.scrollY > 0) {
+    const targetY = _libState.scrollY;
+    // Use two rAF passes to ensure the browser has painted the full grid
+    // before we attempt to scroll. Cards have fixed aspect-ratio so heights
+    // are deterministic even with lazy images — two passes is enough.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      window.scrollTo({ top: targetY, behavior: 'instant' });
+    }));
+  }
+}
 /* ═══════════════════════════════════════════════════
    GAME DETAIL
 ═══════════════════════════════════════════════════ */
@@ -243,18 +385,61 @@ export async function renderGameDetail(id) {
 
   const coverAlts = game.cover_alts || (game.cover_url ? [game.cover_url] : []);
 
+  // Section 2: save scroll before we left the library
+  // (already saved when navigating away from library in app.js navigate())
+
+  // Section 3: prev/next from ordered library list
+  const orderedIds = _libState.orderedIds;
+  const currentIdx = orderedIds.indexOf(id);
+  const prevId     = currentIdx > 0 ? orderedIds[currentIdx - 1] : null;
+  const nextId     = currentIdx >= 0 && currentIdx < orderedIds.length - 1 ? orderedIds[currentIdx + 1] : null;
+
+  // Section 5: average rating display (stored as igdb_rating on game)
+  const avgRating = game.igdb_rating ? (game.igdb_rating / 20).toFixed(1) : null; // IGDB is 0-100 → 0-5
+
   main().innerHTML = `
-    <div class="game-hero">
-      <div class="game-hero-cover-wrap">
-        ${game.cover_url
-          ? `<img src="${h(game.cover_url)}" class="game-hero-cover" id="heroCover" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="game-hero-cover-ph" style="display:none">${h((game.title||'').slice(0,2).toUpperCase())}</div>`
-          : `<div class="game-hero-cover-ph">${h((game.title||'').slice(0,2).toUpperCase())}</div>`}
-        ${coverAlts.length > 1 ? `<button class="cover-change-btn" id="changeCoverBtn" title="Change poster">🖼</button>` : ''}
+    <!-- Back button + Prev/Next nav -->
+    <div class="game-nav-bar">
+      <button class="btn-outline game-nav-back" id="backToLibraryBtn">← Back to Library</button>
+      <div class="game-nav-arrows">
+        <button class="btn-outline game-nav-arrow${prevId?'':' disabled'}" id="prevGameBtn" title="Previous game (Q)" ${prevId?'':'disabled'}>‹ Prev</button>
+        <span class="game-nav-position">${currentIdx >= 0 ? `${currentIdx+1} / ${orderedIds.length}` : ''}</span>
+        <button class="btn-outline game-nav-arrow${nextId?'':' disabled'}" id="nextGameBtn" title="Next game (E)" ${nextId?'':'disabled'}>Next ›</button>
       </div>
+    </div>
+
+    <div class="game-hero">
+      <div class="game-hero-cover-col">
+        <div class="game-hero-cover-wrap">
+          ${game.cover_url
+            ? `<img src="${h(game.cover_url)}" class="game-hero-cover" id="heroCover" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="game-hero-cover-ph" style="display:none">${h((game.title||'').slice(0,2).toUpperCase())}</div>`
+            : `<div class="game-hero-cover-ph">${h((game.title||'').slice(0,2).toUpperCase())}</div>`}
+          ${coverAlts.length > 1 ? `<button class="cover-change-btn" id="changeCoverBtn" title="Change poster">🖼</button>` : ''}
+        </div>
+
+        <!-- Section 10: Ratings block below poster -->
+        <div class="game-ratings-block">
+          <div class="game-hours-display">⏱ ${fmtHours(game.total_hours)}</div>
+          ${game.rating ? `
+          <div class="game-rating-row">
+            <span class="game-rating-label">Your Rating</span>
+            <span class="game-rating-stars">${fmtStars(game.rating)}</span>
+            <span class="game-rating-num">${game.rating} / 5</span>
+          </div>` : ''}
+          ${avgRating ? `
+          <div class="game-rating-row game-rating-row-avg">
+            <span class="game-rating-label">IGDB Avg</span>
+            <span class="game-rating-stars">${fmtStars(avgRating)}</span>
+            <span class="game-rating-num">${avgRating} / 5</span>
+          </div>` : ''}
+        </div>
+      </div>
+
       <div class="game-hero-meta">
         <h1>${h(game.title)}</h1>
         <div class="game-meta-row">
           ${statusBadge(game.status)}
+          ${game.want_to_replay?'<span class="badge badge-replay">🔁 Replay</span>':''}
           ${game.via_subscription?'<span class="sub-badge">📦 Played via Subscription</span>':''}
           ${game.platform||game.platforms?`<span class="game-meta-item">📱 ${h(game.platforms||game.platform)}</span>`:''}
           ${game.release_year?`<span class="game-meta-item">📅 ${h(game.release_year)}</span>`:''}
@@ -262,16 +447,15 @@ export async function renderGameDetail(id) {
           ${game.genre?`<span class="game-meta-item">🎭 ${h(game.genre)}</span>`:''}
         </div>
         ${game.description?`<p class="game-desc">${h(game.description)}</p>`:''}
-        <div class="game-meta-row" style="margin-top:.75rem">
-          <span class="game-meta-item">⏱ <strong>${fmtHours(game.total_hours)}</strong> played</span>
-          ${game.rating?`<span class="game-meta-item rating-display">${fmtStars(game.rating)} <span style="font-size:.8rem;color:var(--text3)">(${game.rating})</span></span>`:''}
+        <div class="game-meta-row" style="margin-top:.5rem">
           ${game.date_completed?`<span class="game-meta-item">✅ Completed ${fmtDate(game.date_completed)}</span>`:''}
+          ${game.progress_pct!=null&&game.status==='paused'?`<span class="game-meta-item">⏸ Progress: <strong>${game.progress_pct}%</strong></span>`:''}
         </div>
         ${game.review?`<blockquote class="game-review-block">${h(game.review)}</blockquote>`:''}
         <div class="game-actions">
           <button class="btn-primary" data-nav="game/${id}/edit">Edit Game</button>
           <button class="btn-outline" id="addSessionBtn">+ Log Session</button>
-          ${game.status!=='completed'&&game.status!=='100%'
+          ${normStatus(game.status)!=='completed'&&normStatus(game.status)!=='100%'
             ? `<button class="btn-outline" id="markCompleteBtn">Mark Complete</button>`:''}
           <button class="btn-xs btn-xs-danger" id="deleteGameBtn">Delete</button>
         </div>
@@ -336,7 +520,7 @@ export async function renderGameDetail(id) {
                 <span>💯 100% Completed</span>
               </label>
               <label class="complete-type-opt">
-                <input type="radio" name="completion_type" value="no-ending">
+                
                 <span>♾️ Game has no ending</span>
               </label>
             </div>
@@ -390,6 +574,35 @@ export async function renderGameDetail(id) {
       el.classList.toggle('selected', el.dataset.coverUrl === url);
     });
   });
+
+  // Section 2: Back to library — restore scroll + filter state
+  document.getElementById('backToLibraryBtn').addEventListener('click', () => {
+    _nav('library:restore');
+  });
+
+  // Section 3: Prev/next game navigation
+  document.getElementById('prevGameBtn')?.addEventListener('click', () => {
+    if (prevId) _nav(`game/${prevId}`);
+  });
+  document.getElementById('nextGameBtn')?.addEventListener('click', () => {
+    if (nextId) _nav(`game/${nextId}`);
+  });
+
+  // Section 3: Keyboard shortcuts Q (prev) and E (next)
+  // Store handler on element so we can remove it when navigating away
+  const _keyHandler = e => {
+    // Only fire when not typing in an input/textarea
+    if (e.target.matches('input,textarea,select')) return;
+    if (e.key === 'q' || e.key === 'Q') { if (prevId) _nav(`game/${prevId}`); }
+    if (e.key === 'e' || e.key === 'E') { if (nextId) _nav(`game/${nextId}`); }
+  };
+  document.addEventListener('keydown', _keyHandler);
+  // Clean up listener when we leave this page
+  const _cleanupKeyHandler = () => {
+    document.removeEventListener('keydown', _keyHandler);
+    window.removeEventListener('gt:navigate', _cleanupKeyHandler);
+  };
+  window.addEventListener('gt:navigate', _cleanupKeyHandler, { once: true });
 
   document.getElementById('addSessionBtn').onclick = () => {
     // Section 5/9: default end time to now when modal opens
@@ -566,6 +779,20 @@ export async function renderGameForm(id) {
             <label class="checkbox-row"><input type="checkbox" name="via_subscription" ${game?.via_subscription?'checked':''}> <span>Played via subscription (Game Pass, PS Plus, etc.)</span></label>
           </div>
 
+          <!-- Section 7: Want to Replay -->
+          <div class="form-group mb-md">
+            <label class="checkbox-row"><input type="checkbox" name="want_to_replay" id="wantReplayCheck" ${game?.want_to_replay?'checked':''}> <span>Want to replay</span></label>
+          </div>
+
+          <!-- Section 11: Progress (shown for Paused games) -->
+          <div class="form-group mb-md" id="progressPctGroup" style="${(game?.status||'backlog')==='paused'?'':'display:none'}">
+            <label>Progress <span style="font-size:.72rem;color:var(--text3)">(for paused games)</span></label>
+            <div style="display:flex;align-items:center;gap:.5rem">
+              <input type="number" name="progress_pct" id="progressPctInput" class="input" style="max-width:90px" min="0" max="100" value="${game?.progress_pct||''}" placeholder="0">
+              <span style="color:var(--text3)">%</span>
+            </div>
+          </div>
+
           <!-- Section 2: Review — shown for both add AND edit -->
           <div class="form-group mb-md">
             <label>Review / Notes <span style="font-size:.72rem;color:var(--text3)">(optional)</span></label>
@@ -617,6 +844,15 @@ export async function renderGameForm(id) {
 
   // Section 3: Render platform checkboxes
   renderPlatformCheckboxes('platformCheckboxes', currentPlatforms);
+
+  // Section 11: Show/hide progress_pct based on status
+  const statusSelect = document.querySelector('[name="status"]');
+  const progressGroup = document.getElementById('progressPctGroup');
+  if (statusSelect && progressGroup) {
+    statusSelect.addEventListener('change', () => {
+      progressGroup.style.display = statusSelect.value === 'paused' ? '' : 'none';
+    });
+  }
 
   // Section 6: Star rating widget
   const starWidget = renderStarRating('starRatingWidget', game?.rating || 0, val => {
@@ -705,6 +941,18 @@ export async function renderGameForm(id) {
         });
       }
       acStat.textContent = `✓ Loaded: ${merged.title}`;
+      // Section 5: store igdb_rating in hidden field for saving with game
+      if (merged.igdb_rating) {
+        let igdbRatingInput = document.getElementById('igdbRatingHidden');
+        if (!igdbRatingInput) {
+          igdbRatingInput = document.createElement('input');
+          igdbRatingInput.type = 'hidden';
+          igdbRatingInput.id   = 'igdbRatingHidden';
+          igdbRatingInput.name = 'igdb_rating';
+          document.getElementById('gameForm').appendChild(igdbRatingInput);
+        }
+        igdbRatingInput.value = merged.igdb_rating;
+      }
     }
   });
 
@@ -743,6 +991,9 @@ export async function renderGameForm(id) {
       review:       fd.get('review') || '',         // Section 2
       date_completed: fd.get('date_completed') || null,
       date_added:   game?.date_added || now,
+      igdb_rating:  fd.get('igdb_rating') ? parseInt(fd.get('igdb_rating')) : (game?.igdb_rating || null),
+      want_to_replay: fd.get('want_to_replay') === 'on',
+      progress_pct:   fd.get('status') === 'paused' ? (parseInt(fd.get('progress_pct')) || null) : null,
     };
 
     if (!obj.title) { toast('Title is required','error'); return; }
@@ -762,6 +1013,25 @@ export async function renderGameForm(id) {
     toast(isEdit ? 'Game updated!' : 'Game added to library!', 'success');
     _nav(isEdit ? `game/${id}` : 'library');
   });
+
+  // Section 9: Q/E keyboard shortcuts also work in edit view
+  // (only fire when not typing in a field)
+  if (isEdit) {
+    const orderedIds = _libState.orderedIds;
+    const currentIdx = orderedIds.indexOf(id);
+    const prevId     = currentIdx > 0 ? orderedIds[currentIdx - 1] : null;
+    const nextId     = currentIdx >= 0 && currentIdx < orderedIds.length - 1 ? orderedIds[currentIdx + 1] : null;
+
+    const _editKeyHandler = e => {
+      if (e.target.matches('input,textarea,select')) return;
+      if (e.key === 'q' || e.key === 'Q') { if (prevId) _nav(`game/${prevId}/edit`); }
+      if (e.key === 'e' || e.key === 'E') { if (nextId) _nav(`game/${nextId}/edit`); }
+    };
+    document.addEventListener('keydown', _editKeyHandler);
+    window.addEventListener('gt:navigate', () => {
+      document.removeEventListener('keydown', _editKeyHandler);
+    }, { once: true });
+  }
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1415,7 +1685,7 @@ export async function renderStats() {
             ${status_counts.map(sc=>{
               const max = Math.max(...status_counts.map(x=>x.cnt),1);
               const pct = Math.round((sc.cnt/max)*100);
-              return `<div class="bar-item"><span class="bar-label ${sc.status==='100%'?'badge badge-100':sc.status==='no-ending'?'badge badge-no-ending':'badge badge-'+sc.status}">${statusLabel(sc.status)}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><span class="bar-val">${sc.cnt}</span></div>`;
+              return `<div class="bar-item"><span class="bar-label badge badge-${normStatus(sc.status)==='100%'?'100':normStatus(sc.status)}">${statusLabel(sc.status)}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><span class="bar-val">${sc.cnt}</span></div>`;
             }).join('')}
           </div>
         </div>
@@ -1739,9 +2009,18 @@ export async function renderProfile() {
 
   const total_hours = lib.reduce((t,g)=>t+(Number(g.total_hours)||0),0);
   const completed   = lib.filter(g=>g.status==='completed'||g.status==='100%').length;
-  const avg_rating  = lib.filter(g=>g.rating).length
-    ? (lib.filter(g=>g.rating).reduce((t,g)=>t+Number(g.rating),0)/lib.filter(g=>g.rating).length).toFixed(1)
+  const ratedGames  = lib.filter(g=>g.rating);
+  const avg_rating  = ratedGames.length
+    ? (ratedGames.reduce((t,g)=>t+Number(g.rating),0)/ratedGames.length).toFixed(1)
     : null;
+
+  // Section 4: rating curve data — distribution across all 0.5-step values
+  const RATING_STEPS = [0.5,1,1.5,2,2.5,3,3.5,4,4.5,5];
+  const ratingDist   = RATING_STEPS.map(r => ({
+    r,
+    count: ratedGames.filter(g => Math.abs(Number(g.rating) - r) < 0.01).length,
+  }));
+  const maxRatingCount = Math.max(1, ...ratingDist.map(d => d.count));
 
   const recentlyPlayed = lib.filter(g=>g.last_played).sort((a,b)=>b.last_played.localeCompare(a.last_played)).slice(0,4);
   const favMap = {};
@@ -1808,7 +2087,7 @@ export async function renderProfile() {
           const g = favMap[slot];
           return `<div class="fav-slot" data-slot="${slot}">
             ${g
-              ? `${g.cover_url?`<img src="${h(g.cover_url)}" class="fav-cover" loading="lazy" onerror="this.style.display='none'">`:``}
+              ? `${g.cover_url?`<img src="${h(hiResCover(g))}" class="fav-cover" loading="lazy" onerror="this.src='${h(g.cover_url)}'">`:``}
                  <div class="fav-overlay"><span class="fav-title">${h(g.title)}</span><button class="fav-edit-btn" data-slot="${slot}">✎</button></div>`
               : `<div class="fav-empty" data-slot="${slot}"><div class="fav-add-icon">+</div><div class="fav-add-label">Add Favorite</div></div>`}
           </div>`;
@@ -1822,15 +2101,42 @@ export async function renderProfile() {
       <div class="recent-grid">
         ${recentlyPlayed.map(g=>`
           <div class="recent-card" data-nav="game/${g.id}">
-            ${g.cover_url?`<img src="${h(g.cover_url)}" class="recent-cover" loading="lazy">`:
-              `<div class="recent-placeholder">${h((g.title||'').slice(0,2).toUpperCase())}</div>`}
-            <div class="recent-info">
-              <span class="recent-title">${h(g.title)}</span>
-              <span class="recent-hours">${fmtHours(g.total_hours)}</span>
+            <div class="recent-poster-wrap">
+              ${g.cover_url
+                ? `<img src="${h(hiResCover(g))}" class="recent-cover" loading="lazy"
+                        onerror="this.src='${h(g.cover_url)}'">` 
+                : `<div class="recent-placeholder">${h((g.title||'').slice(0,2).toUpperCase())}</div>`}
+              <div class="recent-overlay">
+                <span class="recent-title">${h(g.title)}</span>
+                <span class="recent-hours">${fmtHours(g.total_hours)}</span>
+              </div>
             </div>
           </div>`).join('')}
       </div>
     </div>`:''}
+
+    <!-- Section 4: Rating curve visualization -->
+    ${ratedGames.length ? `
+    <div class="profile-section">
+      <div class="section-head">
+        <h2>Rating Distribution</h2>
+        <span class="section-sub">${ratedGames.length} rated game${ratedGames.length!==1?'s':''} · avg ${avg_rating}★</span>
+      </div>
+      <div class="rating-curve">
+        ${ratingDist.map(d => {
+          const BAR_MAX_PX = 140; // max bar height in px — drives the container height
+          const barPx = d.count > 0 ? Math.max(4, Math.round((d.count / maxRatingCount) * BAR_MAX_PX)) : 0;
+          return `
+          <div class="rating-curve-col">
+            <span class="rating-curve-count">${d.count > 0 ? d.count : ''}</span>
+            <div class="rating-curve-bar-wrap">
+              <div class="rating-curve-bar" style="height:${barPx}px"></div>
+            </div>
+            <span class="rating-curve-label">${Number.isInteger(d.r) ? d.r : d.r}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>` : ''}
 
     <div class="form-card">
       <h3 style="font-size:.9rem;font-weight:700;margin-bottom:1rem">Data</h3>
@@ -2023,6 +2329,13 @@ export async function renderSettings() {
           </label>
           <p class="label-hint" style="margin-top:.3rem">Useful if you always log sessions immediately after finishing.</p>
         </div>
+        <div class="form-group mb-md">
+          <label class="checkbox-row">
+            <input type="checkbox" id="autoStatusInactive" ${s.auto_status_inactive==='true'?'checked':''}>
+            <span>Auto-change inactive "Playing" games to "Played"</span>
+          </label>
+          <p class="label-hint" style="margin-top:.3rem">If a game with status <em>Playing</em> has no session logged for 30 days, it will automatically move to <em>Played</em>. Only runs once per day when you open the dashboard. Requires at least 5 sessions and 14 days of logging history.</p>
+        </div>
         <button class="btn-primary" id="saveLoggingSettings">Save</button>
       </div>
 
@@ -2067,6 +2380,13 @@ export async function renderSettings() {
           </div>
           ${igdbCid?`<button class="btn-xs" id="testIgdbBtn">Test</button>`:''}
         </div>
+        ${igdbCid && !s.sync_worker_url ? `
+        <div class="igdb-warning-banner">
+          ⚠️ <strong>Worker URL not configured.</strong>
+          IGDB search requires your Cloudflare Worker URL to work correctly —
+          CORS proxies strip the authentication headers IGDB needs.
+          Set your Worker URL in <strong>☁️ Cloud Sync</strong> above, then save.
+        </div>` : ''}
         <div class="igdb-how-to">
           <details>
             <summary>How to get free IGDB credentials (2 min)</summary>
@@ -2117,7 +2437,27 @@ export async function renderSettings() {
           Tools for fixing or refreshing library data. These only update the specific field — other data is not touched.
         </p>
 
+        <!-- KV Request Monitor -->
         <div class="debug-tool-row">
+          <div>
+            <strong>☁️ KV Request Monitor</strong>
+            <p class="label-hint">Live counter of Cloudflare KV reads and writes since this tab opened. Helps diagnose unexpectedly high usage. Updates every 10 seconds.</p>
+          </div>
+          <button class="btn-outline" id="kvMonitorToggle">Show</button>
+        </div>
+        <div id="kvMonitorPanel" style="display:none;margin-top:.75rem">
+          <div class="kv-monitor-grid" id="kvMonitorGrid">Loading…</div>
+          <div style="font-size:.75rem;color:var(--text3);margin-top:.5rem">
+            Cloudflare free limits: 100,000 reads/day · 1,000 writes/day
+          </div>
+          <div style="display:flex;gap:.5rem;margin-top:.5rem;flex-wrap:wrap">
+            <button class="btn-xs btn-outline" id="kvWindow10">Last 10 min</button>
+            <button class="btn-xs btn-outline" id="kvWindow5">Last 5 min</button>
+            <button class="btn-xs btn-outline" id="kvWindow30">Last 30 min</button>
+          </div>
+        </div>
+
+        <div class="debug-tool-row" style="margin-top:1.25rem">
           <div>
             <strong>Re-import all descriptions</strong>
             <p class="label-hint">Re-fetches game descriptions from IGDB or Steam for every game in your library. Only overwrites the description field — your notes, ratings, and play data are safe.</p>
@@ -2196,6 +2536,8 @@ export async function renderSettings() {
   document.getElementById('saveLoggingSettings').addEventListener('click', async () => {
     const checked = document.getElementById('logDefaultEndNow').checked;
     await DB.setSetting(_user, 'log_default_end_to_now', checked ? 'true' : 'false');
+    const autoInactive = document.getElementById('autoStatusInactive')?.checked;
+    await DB.setSetting(_user, 'auto_status_inactive', autoInactive ? 'true' : 'false');
     toast('Logging settings saved!', 'success');
   });
 
@@ -2223,6 +2565,8 @@ export async function renderSettings() {
     await DB.setSetting(_user, 'sync_enabled',    enabled ? 'true' : 'false');
     await DB.setSetting(_user, 'sync_worker_url', workerUrl);
     const { startSync, stopSync } = await import('./sync.js');
+    const { setIGDBWorkerUrl }    = await import('./search.js');
+    setIGDBWorkerUrl(workerUrl || null);   // keep IGDB proxy in sync
     if (enabled) await startSync(_user, workerUrl || null);
     else stopSync();
     toast(enabled ? 'Sync settings saved!' : 'Sync disabled', 'success');
@@ -2262,12 +2606,20 @@ export async function renderSettings() {
 
   document.getElementById('testIgdbBtn')?.addEventListener('click', async () => {
     const el = document.getElementById('igdbTestResult');
+    const workerSaved = (await DB.getAllSettings(_user)).sync_worker_url;
     el.style.display='block'; el.className='igdb-test-result'; el.textContent='Testing…';
     const cid = document.getElementById('igdbCid').value.trim();
     const cs  = document.getElementById('igdbCs').value.trim();
-    const r   = await testIGDB(cid,cs);
-    el.className = `igdb-test-result ${r.ok?'igdb-test-ok':'igdb-test-fail'}`;
-    el.textContent = r.ok ? `✓ Connected — ${r.count} results for "Fortnite"` : `✗ ${r.error}`;
+    const r   = await testIGDB(cid, cs);
+    el.className = `igdb-test-result ${r.ok ? 'igdb-test-ok' : 'igdb-test-fail'}`;
+    if (r.ok) {
+      el.textContent = r.count > 0
+        ? `✓ Connected — ${r.count} results for "Halo"`
+        : `⚠ Auth succeeded but 0 results returned. ${workerSaved ? 'Worker may need redeployment (update cloudflare-worker.js).' : 'Set your Worker URL in Cloud Sync above, then save and test again.'}`;
+      if (r.count === 0) el.className = 'igdb-test-result igdb-test-fail';
+    } else {
+      el.textContent = `✗ ${r.error}${!workerSaved ? ' — No Worker URL set. Go to Cloud Sync above and save your Worker URL.' : ''}`;
+    }
   });
 
   // Section 10 + Section 1: Re-import descriptions debug tool
@@ -2304,6 +2656,79 @@ export async function renderSettings() {
     } catch(e) {
       statusEl.textContent = `✗ ${e.message}`; statusEl.style.color = 'var(--red)';
     }
+  });
+
+  // KV Monitor panel
+  let _kvWindow = 10 * 60 * 1000;
+  let _kvRefreshTimer = null;
+  let _kvOpen = false;
+
+  function renderKVMonitor() {
+    const panel = document.getElementById('kvMonitorPanel');
+    if (!panel || !_kvOpen) return;
+    const grid = document.getElementById('kvMonitorGrid');
+    const { reads, writes, total, windowMinutes } = getKVStats(_kvWindow);
+    const readsPerHour  = Math.round(reads  / (windowMinutes / 60));
+    const writesPerHour = Math.round(writes / (windowMinutes / 60));
+    // Daily projection
+    const projReads  = readsPerHour  * 24;
+    const projWrites = writesPerHour * 24;
+    const readPct    = Math.min(100, Math.round((projReads  / 100000) * 100));
+    const writePct   = Math.min(100, Math.round((projWrites / 1000)   * 100));
+    grid.innerHTML = `
+      <div class="kv-stat-row">
+        <span class="kv-stat-label">Window</span>
+        <span class="kv-stat-val">Last ${windowMinutes} min</span>
+      </div>
+      <div class="kv-stat-row">
+        <span class="kv-stat-label">📖 Reads</span>
+        <span class="kv-stat-val">${reads} <span style="color:var(--text3);font-size:.8rem">(~${readsPerHour}/hr)</span></span>
+      </div>
+      <div class="kv-stat-row">
+        <span class="kv-stat-label">✍️ Writes</span>
+        <span class="kv-stat-val kv-writes-val${writePct > 80 ? ' kv-danger' : writePct > 50 ? ' kv-warn' : ''}">${writes} <span style="color:var(--text3);font-size:.8rem">(~${writesPerHour}/hr)</span></span>
+      </div>
+      <div class="kv-stat-row">
+        <span class="kv-stat-label">Total requests</span>
+        <span class="kv-stat-val">${total}</span>
+      </div>
+      <div style="margin-top:.75rem">
+        <div class="kv-proj-label">Projected daily writes: <strong>${projWrites}</strong> / 1,000 free
+          <span class="kv-proj-pct${writePct>80?' kv-danger':writePct>50?' kv-warn':''}">${writePct}%</span>
+        </div>
+        <div class="kv-bar-track"><div class="kv-bar-fill${writePct>80?' kv-danger':writePct>50?' kv-warn':''}" style="width:${writePct}%"></div></div>
+      </div>
+      <div style="margin-top:.5rem">
+        <div class="kv-proj-label">Projected daily reads: <strong>${projReads}</strong> / 100,000 free
+          <span class="kv-proj-pct${readPct>80?' kv-danger':readPct>50?' kv-warn':''}">${readPct}%</span>
+        </div>
+        <div class="kv-bar-track"><div class="kv-bar-fill${readPct>80?' kv-danger':readPct>50?' kv-warn':''}" style="width:${readPct}%"></div></div>
+      </div>
+      <div style="font-size:.72rem;color:var(--text3);margin-top:.6rem">
+        ℹ️ Only counts requests made in this browser tab since it was opened.
+        Cloudflare's dashboard shows the true total.
+      </div>`;
+  }
+
+  document.getElementById('kvMonitorToggle').addEventListener('click', () => {
+    _kvOpen = !_kvOpen;
+    const panel = document.getElementById('kvMonitorPanel');
+    const btn   = document.getElementById('kvMonitorToggle');
+    panel.style.display = _kvOpen ? 'block' : 'none';
+    btn.textContent     = _kvOpen ? 'Hide'  : 'Show';
+    if (_kvOpen) {
+      renderKVMonitor();
+      _kvRefreshTimer = setInterval(renderKVMonitor, 10_000);
+    } else {
+      clearInterval(_kvRefreshTimer);
+    }
+  });
+
+  ['kvWindow5','kvWindow10','kvWindow30'].forEach(id => {
+    document.getElementById(id)?.addEventListener('click', () => {
+      _kvWindow = id === 'kvWindow5' ? 5*60000 : id === 'kvWindow30' ? 30*60000 : 10*60000;
+      renderKVMonitor();
+    });
   });
 
   // Section 10: Export all data

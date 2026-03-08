@@ -4,6 +4,7 @@ import { openDB, getProfiles, createProfile, touchProfile, deleteProfile, getAll
 import * as Views from './views.js';
 import { toast, confirm, h } from './ui.js';
 import { initSync, startSync, stopSync, discoverRemoteProfiles } from './sync.js';
+import { setIGDBWorkerUrl } from './search.js';
 
 let currentUser  = null;
 let _isViewOnly  = false;
@@ -166,6 +167,11 @@ async function loginAs(username, viewOnly = false) {
   currentUser  = username;
   _isViewOnly  = viewOnly;
 
+  // Persist login immediately so app updates don't require re-login
+  if (!viewOnly) {
+    try { localStorage.setItem('gt_user', username); } catch(e) {}
+  }
+
   const settings = await getAllSettings(username);
 
   // Apply saved theme & accent
@@ -184,6 +190,9 @@ async function loginAs(username, viewOnly = false) {
   }
 
   Views.init(username, navigate, viewOnly);
+
+  // Give search.js the worker URL so IGDB calls route through it (fixes header stripping)
+  setIGDBWorkerUrl(settings.sync_worker_url || null);
 
   // Start sync (only for non-view-only)
   if (!viewOnly) {
@@ -277,7 +286,22 @@ function setActiveNav(view) {
 }
 
 export function navigate(path, push = true) {
-  if (path === '__profiles__') { stopSync(); currentUser = null; _isViewOnly = false; showProfileSelector(); return; }
+  if (path === '__profiles__') {
+    stopSync();
+    currentUser  = null;
+    _isViewOnly  = false;
+    try { localStorage.removeItem('gt_user'); } catch(e) {}
+    showProfileSelector();
+    return;
+  }
+
+  // Section 2 FIX: save scroll BEFORE hash changes, using current hash
+  const currentHash = location.hash.slice(1);
+  if (currentHash.match(/^game\//) && (path === 'library' || path === 'library:restore')) {
+    Views.saveLibraryScroll(window.scrollY);
+  }
+
+  window.dispatchEvent(new CustomEvent('gt:navigate', { detail: { path } }));
   const hash = '#' + path;
   if (push && location.hash !== hash) history.pushState(null, '', hash);
   dispatch(path);
@@ -286,16 +310,17 @@ export function navigate(path, push = true) {
 function dispatch(path) {
   if (!currentUser) { showProfileSelector(); return; }
   const exactMap = {
-    'dashboard':      () => { setActiveNav('dashboard');       Views.renderDashboard(); },
-    'library':        () => { setActiveNav('library');         Views.renderLibrary(); },
-    'log':            () => { setActiveNav('log');             Views.renderLog(); },
-    'session-logger': () => { setActiveNav('session-logger');  Views.renderSessionLogger(); },
-    'stats':          () => { setActiveNav('stats');           Views.renderStats(); },
-    'wishlist':       () => { setActiveNav('wishlist');        Views.renderWishlist(); },
-    'browse':         () => { setActiveNav('browse');          Views.renderBrowse(); },
-    'profile':        () => { setActiveNav('profile');         Views.renderProfile(); },
-    'settings':       () => { setActiveNav('settings');        Views.renderSettings(); },
-    'add':            () => { setActiveNav('library');         Views.renderGameForm(null); },
+    'dashboard':       () => { setActiveNav('dashboard');       Views.renderDashboard(); },
+    'library':         () => { setActiveNav('library');         Views.renderLibrary(false); },
+    'library:restore': () => { setActiveNav('library');         Views.renderLibrary(true); },
+    'log':             () => { setActiveNav('log');             Views.renderLog(); },
+    'session-logger':  () => { setActiveNav('session-logger');  Views.renderSessionLogger(); },
+    'stats':           () => { setActiveNav('stats');           Views.renderStats(); },
+    'wishlist':        () => { setActiveNav('wishlist');        Views.renderWishlist(); },
+    'browse':          () => { setActiveNav('browse');          Views.renderBrowse(); },
+    'profile':         () => { setActiveNav('profile');         Views.renderProfile(); },
+    'settings':        () => { setActiveNav('settings');        Views.renderSettings(); },
+    'add':             () => { setActiveNav('library');         Views.renderGameForm(null); },
   };
   if (exactMap[path]) { exactMap[path](); return; }
 
@@ -346,7 +371,8 @@ document.addEventListener('click', e => {
 /* ── Boot ─────────────────────────────────────────── */
 async function boot() {
   await openDB();
-  const remembered = sessionStorage.getItem('gt_user');
+  // Use localStorage so login survives page refreshes, tab closes, and app updates
+  const remembered = localStorage.getItem('gt_user');
   if (remembered) {
     const profiles = await getProfiles();
     if (profiles.find(p => p.username === remembered)) {
@@ -355,10 +381,6 @@ async function boot() {
   }
   showProfileSelector();
 }
-
-window.addEventListener('beforeunload', () => {
-  if (currentUser) sessionStorage.setItem('gt_user', currentUser);
-});
 
 boot().catch(err => {
   console.error('Boot error:', err);

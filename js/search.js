@@ -163,36 +163,188 @@ function steamCardFromItem(item) {
 }
 
 /* ═══════════════════════════════════════════════════
-   IGDB
-═══════════════════════════════════════════════════ */
-let _token = null, _tokenExp = 0;
+   IGDB — WHY SEARCH SHOWS 0 RESULTS
+   ─────────────────────────────────────────────────
+   The fundamental problem is CORS. IGDB's API requires
+   two custom HTTP headers on every request:
+     Client-ID: <your id>
+     Authorization: Bearer <token>
 
+   Public CORS proxies (corsproxy.io, allorigins) only
+   forward GET requests cleanly. For POST with custom
+   headers they either strip the headers or reject the
+   request entirely — IGDB returns [] or 401.
+
+   THE ONLY RELIABLE SOLUTION for a static site is to
+   route IGDB calls through YOUR Cloudflare Worker, which
+   makes the request server-side with full header control.
+
+   HOW IT WORKS:
+   1. Browser  →  POST /igdb/games  →  Your CF Worker
+                  (headers: X-IGDB-Client-ID, X-IGDB-Token)
+   2. CF Worker →  POST api.igdb.com/v4/games
+                  (headers: Client-ID, Authorization)
+   3. IGDB results flow back through Worker → Browser
+
+   If no worker URL is saved, we fall back to corsproxy.io
+   which may work some of the time for the Twitch token
+   fetch but is unreliable for IGDB queries.
+
+   SETUP: Settings → Cloud Sync → enter your Worker URL.
+   The updated cloudflare-worker.js already includes the
+   /igdb/* proxy endpoint and /igdb-token endpoint.
+═══════════════════════════════════════════════════ */
+
+let _token = null, _tokenExp = 0;
+let _workerUrl    = null; // injected by app.js after login
+let _workerHasIGDB = null; // null=untested, true=confirmed, false=not available
+
+/** Called by app.js immediately after reading settings */
+export function setIGDBWorkerUrl(url) {
+  const newUrl = url ? String(url).trim().replace(/\/+$/, '') : null;
+  if (newUrl !== _workerUrl) {
+    _workerHasIGDB = null; // re-test on next search when URL changes
+  }
+  _workerUrl = newUrl;
+}
+
+/**
+ * Get a cached Twitch/IGDB OAuth token.
+ * Tries the worker proxy first (most reliable), then falls back to
+ * a direct CORS proxy of the Twitch token endpoint (no custom headers
+ * needed for the token request itself, so proxies work fine here).
+ */
 async function igdbToken(id, secret) {
-  if (_token && Date.now() < _tokenExp - 60000) return _token;
-  const r = await fetch(
-    `https://id.twitch.tv/oauth2/token?client_id=${id}&client_secret=${secret}&grant_type=client_credentials`,
-    { method: 'POST', signal: AbortSignal.timeout(8000) }
-  );
-  const d = await r.json();
-  if (!d.access_token) throw new Error(d.message || 'IGDB auth failed');
-  _token    = d.access_token;
-  _tokenExp = Date.now() + (d.expires_in || 3600) * 1000;
+  if (_token && Date.now() < _tokenExp - 60_000) return _token;
+
+  let data = null;
+
+  // Path 1: via worker /igdb-token (preferred — works everywhere)
+  if (_workerUrl) {
+    try {
+      const r = await fetch(`${_workerUrl}/igdb-token`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ client_id: id, client_secret: secret }),
+        signal:  AbortSignal.timeout(9000),
+      });
+      if (r.ok) { data = await r.json(); }
+    } catch(e) { /* fall through */ }
+  }
+
+  // Path 2: direct CORS proxy of Twitch endpoint
+  // The Twitch token URL uses query-params, no custom headers → proxies work
+  if (!data?.access_token) {
+    const twitchUrl = `https://id.twitch.tv/oauth2/token?client_id=${encodeURIComponent(id)}&client_secret=${encodeURIComponent(secret)}&grant_type=client_credentials`;
+    const proxied   = `https://corsproxy.io/?${encodeURIComponent(twitchUrl)}`;
+    try {
+      const r = await fetch(proxied, { method: 'POST', signal: AbortSignal.timeout(9000) });
+      if (r.ok) { data = await r.json(); }
+    } catch(e) { /* fall through */ }
+  }
+
+  if (!data?.access_token) {
+    throw new Error(
+      data?.message ||
+      'IGDB auth failed. Make sure your Worker URL is set in Settings → Cloud Sync.'
+    );
+  }
+
+  _token    = data.access_token;
+  _tokenExp = Date.now() + (data.expires_in || 3600) * 1000;
   return _token;
 }
 
+/**
+ * POST to IGDB API endpoint with Apicalypse body.
+ *
+ * Strategy:
+ *   1. If worker URL set AND worker has /igdb endpoint → use worker (best)
+ *   2. Otherwise → CORS proxy (same path that works when sync is disabled)
+ *
+ * _workerHasIGDB tracks whether the worker supports /igdb.
+ * On first call it tests the endpoint; if it gets a 404 (old worker not yet
+ * redeployed) it falls back to CORS proxies for the rest of the session.
+ * This means sync can be enabled WITHOUT redeploying the worker and search
+ * keeps working exactly as it did before sync was turned on.
+ */
 async function igdbPost(endpoint, body, clientId, clientSecret) {
   const token = await igdbToken(clientId, clientSecret);
-  const r = await fetch(
-    `https://corsproxy.io/?${encodeURIComponent('https://api.igdb.com/v4/' + endpoint)}`,
-    {
-      method:  'POST',
-      headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain' },
-      body,
-      signal:  AbortSignal.timeout(9000),
+
+  // ── Path 1: Worker proxy (only if worker has the /igdb endpoint) ──────────
+  if (_workerUrl && _workerHasIGDB !== false) {
+    try {
+      const r = await fetch(`${_workerUrl}/igdb/${endpoint}`, {
+        method:  'POST',
+        headers: {
+          'Content-Type':     'text/plain',
+          'X-IGDB-Client-ID': clientId,
+          'X-IGDB-Token':     token,
+        },
+        body,
+        signal: AbortSignal.timeout(12000),
+      });
+      if (r.status === 404) {
+        // Old worker — /igdb endpoint not deployed yet. Use CORS proxies.
+        _workerHasIGDB = false;
+        console.info('[IGDB] Worker missing /igdb endpoint — falling back to CORS proxy. Redeploy cloudflare-worker.js to use worker-based search.');
+        // fall through to Path 2
+      } else if (!r.ok) {
+        // Other worker error — also fall through
+        console.warn(`[IGDB] Worker error ${r.status} — falling back to CORS proxy`);
+        // fall through to Path 2
+      } else {
+        _workerHasIGDB = true;
+        const raw = await r.json();
+        if (Array.isArray(raw)) return raw;
+        if (raw?.error) throw new Error(raw.error);
+        return raw;
+      }
+    } catch(e) {
+      // Network error or timeout — fall through to CORS proxy
+      console.warn('[IGDB] worker fetch failed:', e.message);
     }
+  }
+
+  // ── Path 2: CORS proxy — the proven-working path used when sync is off ────
+  // corsproxy.io forwards POST bodies and custom headers to IGDB.
+  const target = `https://api.igdb.com/v4/${endpoint}`;
+  const hdrs   = {
+    'Client-ID':     clientId,
+    'Authorization': `Bearer ${token}`,
+    'Content-Type':  'text/plain',
+  };
+
+  try {
+    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(target)}`,
+      { method: 'POST', headers: hdrs, body, signal: AbortSignal.timeout(10000) });
+    if (r.ok) {
+      const raw = await r.json();
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw?.contents === 'string') {
+        try { return JSON.parse(raw.contents); } catch(_) {}
+      }
+      return raw;
+    }
+  } catch(e) { /* try next proxy */ }
+
+  // Second CORS proxy as last resort
+  try {
+    const r = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
+      { method: 'POST', headers: hdrs, body, signal: AbortSignal.timeout(10000) });
+    if (r.ok) {
+      const raw = await r.json();
+      if (Array.isArray(raw)) return raw;
+      return raw;
+    }
+  } catch(e) { /* give up */ }
+
+  throw new Error(
+    `IGDB search failed via all methods. ` +
+    (_workerUrl && _workerHasIGDB === false
+      ? 'Worker is running but needs the updated cloudflare-worker.js redeployed for IGDB proxy support.'
+      : 'Check your internet connection and IGDB credentials.')
   );
-  if (!r.ok) throw new Error(`IGDB ${r.status}`);
-  return r.json();
 }
 
 function parseIGDBGame(g) {
@@ -220,13 +372,15 @@ function parseIGDBGame(g) {
     slug:         `igdb:${g.id}`,
     source:       'igdb',
     igdb_id:      g.id,
+    igdb_rating:  g.total_rating ? Math.round(g.total_rating) : null,   // 0-100
+    igdb_rating_count: g.total_rating_count || 0,
     header_url:   cover, // for browse card compat
   };
 }
 
 const IGDB_FIELDS = 'name,cover.image_id,artworks.image_id,first_release_date,genres.name,' +
   'involved_companies.company.name,involved_companies.developer,involved_companies.publisher,' +
-  'summary,id,platforms.name';
+  'summary,id,platforms.name,total_rating,total_rating_count';
 
 // Section 2.2: broaden query to catch ports, remasters, console editions
 async function igdbSearch(query, clientId, clientSecret) {
