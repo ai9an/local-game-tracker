@@ -172,13 +172,14 @@ function _hashPayload(payload) {
 
 /* ── Payload builder ─────────────────────────────── */
 async function _buildPayload() {
-  const [games, sessions, wishlist, favorites, settings, profile] = await Promise.all([
+  const [games, sessions, wishlist, favorites, settings, profile, tombstones] = await Promise.all([
     DB.getGames(_user),
     DB.getSessions(_user),
     DB.getWishlist(_user),
     DB.getFavorites(_user),
     DB.getAllSettings(_user),
     DB.getProfile(_user),
+    DB.getWishlistTombstones(_user),
   ]);
   return {
     v:         2,
@@ -187,6 +188,7 @@ async function _buildPayload() {
     wishlist,
     favorites,
     settings,
+    wishlist_tombstones: tombstones,   // deleted wishlist item IDs
     pic:       profile?.pic    || null,
     pic_ts:    profile?.pic_ts || null,
     ts:        new Date().toISOString(),  // kept for compat but NOT used in merge logic
@@ -228,12 +230,19 @@ async function _mergePayload(remote, pushIfWeHaveMore) {
   }
   if (localSessions.some(s => !remoteSessionIds.has(s.id))) weHaveSomething = true;
 
-  // Wishlist — additive
-  const localWish    = await DB.getWishlist(_user);
-  const localWishIds = new Set(localWish.map(w => w.id));
-  const remoteWishIds= new Set((remote.wishlist || []).map(w => w.id));
+  // Wishlist — additive BUT respects tombstones (deletions)
+  // 1. Apply remote tombstones first (removes items deleted on another device)
+  const remoteTombstones = remote.wishlist_tombstones || [];
+  if (remoteTombstones.length) {
+    await DB.applyWishlistTombstones(_user, remoteTombstones);
+  }
+  // 2. Add new remote items, but skip any that are locally tombstoned
+  const localWish      = await DB.getWishlist(_user);
+  const localWishIds   = new Set(localWish.map(w => w.id));
+  const localTombstones= new Set(await DB.getWishlistTombstones(_user));
+  const remoteWishIds  = new Set((remote.wishlist || []).map(w => w.id));
   for (const rw of (remote.wishlist || [])) {
-    if (!localWishIds.has(rw.id)) {
+    if (!localWishIds.has(rw.id) && !localTombstones.has(rw.id)) {
       await DB.putWishlistItem(_user, { ...rw, username: _user });
       mergedSomething = true;
     }

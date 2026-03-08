@@ -407,3 +407,87 @@ export function getSelectedPlatforms(containerId) {
   return [...el.querySelectorAll('input[name="platform_cb"]:checked')]
     .map(cb => cb.value).join(', ');
 }
+
+/* ── Section 2: Poster crop modal (2:3 aspect ratio) ── */
+/**
+ * Opens a crop modal tailored for game posters (2:3 ratio).
+ * @param {string} src  — data URL or object URL of the image
+ * @param {function} onCropped — called with a base64 data URL of the cropped poster
+ */
+export function openPosterCropModal(src, onCropped) {
+  const ov = document.createElement('div');
+  ov.className  = 'modal-overlay crop-modal-overlay';
+  ov.style.display = 'flex';
+  ov.innerHTML = `
+    <div class="modal modal-lg crop-modal">
+      <div class="modal-head">
+        <h3>Crop Poster <span style="font-size:.75rem;color:var(--text3);font-weight:400">(drag to reposition)</span></h3>
+        <button class="modal-close" id="closePosterCrop">×</button>
+      </div>
+      <div class="crop-container poster-crop-container">
+        <div class="crop-frame poster-crop-frame" id="posterCropFrame">
+          <img id="posterCropImg" src="${src}" draggable="false">
+          <div class="poster-crop-guide"></div>
+        </div>
+        <div class="crop-controls">
+          <label class="crop-label">Zoom</label>
+          <input type="range" id="posterCropZoom" min="1" max="4" step="0.05" value="1" class="crop-slider">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-outline" id="cancelPosterCrop">Cancel</button>
+        <button class="btn-primary" id="confirmPosterCrop">Use Poster</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+
+  const img   = ov.querySelector('#posterCropImg');
+  const frame = ov.querySelector('#posterCropFrame');
+  const zoom  = ov.querySelector('#posterCropZoom');
+  const guide = ov.querySelector('.poster-crop-guide');
+
+  let scale = 1, ox = 0, oy = 0, dragging = false, startX = 0, startY = 0;
+
+  function clamp() {
+    const fw = frame.offsetWidth, fh = frame.offsetHeight;
+    const iw = img.naturalWidth  * scale;
+    const ih = img.naturalHeight * scale;
+    ox = Math.max(Math.min(0, fw - iw), Math.min(0, ox));
+    oy = Math.max(Math.min(0, fh - ih), Math.min(0, oy));
+  }
+  function apply() {
+    img.style.transform       = `translate(${ox}px,${oy}px) scale(${scale})`;
+    img.style.transformOrigin = '0 0';
+  }
+
+  zoom.addEventListener('input', () => { scale = parseFloat(zoom.value); clamp(); apply(); });
+  frame.addEventListener('mousedown',  e => { dragging=true; startX=e.clientX-ox; startY=e.clientY-oy; e.preventDefault(); });
+  document.addEventListener('mousemove', e => { if (!dragging) return; ox=e.clientX-startX; oy=e.clientY-startY; clamp(); apply(); });
+  document.addEventListener('mouseup',   () => dragging=false);
+  frame.addEventListener('touchstart', e => { dragging=true; startX=e.touches[0].clientX-ox; startY=e.touches[0].clientY-oy; }, {passive:true});
+  frame.addEventListener('touchmove',  e => { if (!dragging) return; ox=e.touches[0].clientX-startX; oy=e.touches[0].clientY-startY; clamp(); apply(); }, {passive:true});
+  frame.addEventListener('touchend',   () => dragging=false);
+
+  ov.querySelector('#closePosterCrop').onclick  = () => ov.remove();
+  ov.querySelector('#cancelPosterCrop').onclick = () => ov.remove();
+
+  ov.querySelector('#confirmPosterCrop').onclick = () => {
+    // Crop to the guide rect (2:3 ratio centred in frame)
+    const gRect = guide.getBoundingClientRect();
+    const fRect = frame.getBoundingClientRect();
+    // Position of guide relative to image origin
+    const gx = (gRect.left - fRect.left - ox) / scale;
+    const gy = (gRect.top  - fRect.top  - oy) / scale;
+    const gw = gRect.width  / scale;
+    const gh = gRect.height / scale;
+
+    const OUT_W = 400, OUT_H = 600; // 2:3 output
+    const canvas = document.createElement('canvas');
+    canvas.width = OUT_W; canvas.height = OUT_H;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, gx, gy, gw, gh, 0, 0, OUT_W, OUT_H);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    ov.remove();
+    onCropped(dataUrl);
+  };
+}

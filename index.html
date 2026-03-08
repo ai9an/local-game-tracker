@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" id="themeColorMeta" content="#0e0e10">
-  <title>Game Tracker</title>
+  <title>LocalLogger</title>
   <meta name="description" content="Your personal gaming journal — track time, log sessions, build your library.">
 
   <!-- Prevent flash of unstyled content — apply saved theme immediately -->
@@ -28,7 +28,7 @@
 
 <!-- ── Navigation ─────────────────────────────────── -->
 <nav class="nav" id="app-nav" style="display:none">
-  <button class="nav-logo" data-nav="dashboard">🎮 GAME TRACKER</button>
+  <button class="nav-logo" data-nav="dashboard" id="navLogo">📓 LOCALLOGGER</button>
 
   <!-- Desktop nav links -->
   <div class="nav-links" id="desktopNav">
@@ -79,5 +79,69 @@
 <!-- ── App bootstrap ──────────────────────────────── -->
 <script type="module" src="js/app.js"></script>
 
+
+<!-- Section 3/4: Developer Options Easter Egg — bidirectional toggle -->
+<script>
+(function() {
+  let clicks    = 0;
+  const THRESH  = 7;   // clicks needed to toggle
+  const HINT_AT = 3;   // show countdown message from this click onwards
+  let   toastEl = null;
+  let   resetTimer = null;
+
+  function showEasterToast(msg) {
+    if (toastEl) toastEl.remove();
+    toastEl = document.createElement('div');
+    toastEl.style.cssText = [
+      'position:fixed','bottom:5rem','left:50%','transform:translateX(-50%)',
+      'background:#1e1e24','border:1px solid #e8673c','color:#e0e0e8',
+      'padding:.6rem 1.2rem','border-radius:8px','font-size:.82rem',
+      'font-family:monospace','z-index:9999','pointer-events:none',
+      'transition:opacity .4s','white-space:nowrap',
+    ].join(';');
+    toastEl.textContent = msg;
+    document.body.appendChild(toastEl);
+    setTimeout(() => {
+      if (toastEl) { toastEl.style.opacity = '0'; setTimeout(() => toastEl?.remove(), 400); toastEl = null; }
+    }, 2400);
+  }
+
+  document.addEventListener('click', function(e) {
+    const logo = e.target.closest('#navLogo');
+    if (!logo) return;
+
+    // Reset click counter if user pauses for > 3 seconds between clicks
+    clearTimeout(resetTimer);
+    resetTimer = setTimeout(() => { clicks = 0; }, 3000);
+
+    const devMode = localStorage.getItem('ll_dev_mode') === '1';
+    clicks++;
+
+    const remaining = THRESH - clicks;
+
+    if (clicks < HINT_AT) {
+      // Silent — no toast yet
+    } else if (clicks < THRESH) {
+      // Show countdown toast
+      if (devMode) {
+        showEasterToast(`You are ${remaining} click${remaining !== 1 ? 's' : ''} away from leaving developer mode`);
+      } else {
+        showEasterToast(`You are ${remaining} click${remaining !== 1 ? 's' : ''} away from becoming a developer`);
+      }
+    } else {
+      // Threshold reached — toggle
+      clicks = 0;
+      clearTimeout(resetTimer);
+      if (devMode) {
+        localStorage.removeItem('ll_dev_mode');
+        showEasterToast('Developer mode disabled.');
+      } else {
+        localStorage.setItem('ll_dev_mode', '1');
+        showEasterToast('🛠 Developer mode unlocked! Check Settings.');
+      }
+    }
+  });
+})();
+</script>
 </body>
 </html>

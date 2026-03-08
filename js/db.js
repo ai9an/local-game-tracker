@@ -137,10 +137,68 @@ export async function getWishlist(username) { return byUser('wishlist', username
 export async function putWishlistItem(username, item) {
   if (!item.id) item.id = crypto.randomUUID();
   item.username = username;
+  // If this item was previously tombstoned locally, remove the tombstone
+  // so it can be re-added cleanly (e.g. user readds something they deleted)
+  await _removeWishlistTombstone(username, item.id);
   return wrap(store('wishlist','readwrite').put(item));
 }
 export async function deleteWishlistItem(username, id) {
-  return wrap(store('wishlist','readwrite').delete([username, id]));
+  await wrap(store('wishlist','readwrite').delete([username, id]));
+  // Record tombstone so sync merge knows this was intentionally deleted
+  await _addWishlistTombstone(username, id);
+}
+
+/* Tombstones: stored in settings as a JSON-encoded list of deleted wishlist IDs.
+   This propagates deletions across synced devices without needing a separate store. */
+const _TOMB_KEY = 'wishlist_tombstones';
+
+async function _getWishlistTombstones(username) {
+  const raw = await getSetting(username, _TOMB_KEY);
+  if (!raw) return [];
+  try { return JSON.parse(raw); } catch { return []; }
+}
+
+async function _saveWishlistTombstones(username, ids) {
+  // Keep at most 500 tombstones (pruned by age would be better but IDs are small)
+  const pruned = ids.slice(-500);
+  return setSetting(username, _TOMB_KEY, JSON.stringify(pruned));
+}
+
+async function _addWishlistTombstone(username, id) {
+  const existing = await _getWishlistTombstones(username);
+  if (!existing.includes(id)) {
+    await _saveWishlistTombstones(username, [...existing, id]);
+  }
+}
+
+async function _removeWishlistTombstone(username, id) {
+  const existing = await _getWishlistTombstones(username);
+  const filtered = existing.filter(t => t !== id);
+  if (filtered.length !== existing.length) {
+    await _saveWishlistTombstones(username, filtered);
+  }
+}
+
+/** Returns the current set of tombstoned (deleted) wishlist item IDs */
+export async function getWishlistTombstones(username) {
+  return _getWishlistTombstones(username);
+}
+
+/** Merge remote tombstones into local — called by sync.js during pull */
+export async function applyWishlistTombstones(username, remoteTombstones = []) {
+  if (!remoteTombstones.length) return;
+  // Delete any locally present items that were deleted on another device
+  const local = await getWishlist(username);
+  for (const id of remoteTombstones) {
+    if (local.some(w => w.id === id)) {
+      // Delete locally but don't re-tombstone (already tombstoned)
+      await wrap(store('wishlist','readwrite').delete([username, id]));
+    }
+  }
+  // Merge tombstone lists
+  const existing = await _getWishlistTombstones(username);
+  const merged   = [...new Set([...existing, ...remoteTombstones])];
+  await _saveWishlistTombstones(username, merged);
 }
 
 /* ── FAVORITES ────────────────────────────────────── */
@@ -164,6 +222,14 @@ export async function putCached(key, data) {
 }
 export async function bustCache(key) {
   try { await wrap(store('game_cache','readwrite').delete(key)); } catch(e) {}
+}
+/** Clears all search, HLTB, and detail cache entries (keys starting with search:, hltb:, detail:) */
+export async function clearSearchCache() {
+  const keys = await wrap(store('game_cache').getAllKeys());
+  const toDelete = keys.filter(k => /^(search:|hltb:|detail:|search_sf:|browse:)/.test(k));
+  for (const k of toDelete) {
+    try { await wrap(store('game_cache','readwrite').delete(k)); } catch(e) {}
+  }
 }
 
 /* ── ACTIVE SESSION (live tracker) ───────────────── */

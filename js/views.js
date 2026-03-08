@@ -1,7 +1,7 @@
 /* js/views.js — All page renderers */
 
 import * as DB from './db.js';
-import { searchGames, searchGamesSteamFirst, getGameDetail, fetchDescriptionForGame, testIGDB, fetchSteamPrice, fetchTrending, searchBrowse } from './search.js';
+import { searchGames, searchGamesSteamFirst, getGameDetail, fetchDescriptionForGame, testIGDB, fetchSteamPrice, fetchTrending, searchBrowse, fetchTimeToBeat, fetchIGDBRatingForGame } from './search.js';
 import { h, fmtHours, fmtStars, fmtDate, fmtPrice, todayISO, nowTimeHHMM, parseDuration, parsePlaytimeInput,
          toast, confirm, openModal, closeModal, closeAllModals,
          Autocomplete, attachDurationCalc, setupCoverPreview,
@@ -262,11 +262,12 @@ export async function renderLibrary(restoreState = false) {
         return `<button class="filter-pill${active?' active':''}" data-status="${s}">${label}</button>`;
       }).join('')}
       <input type="search" class="input filter-search" id="libSearch" placeholder="Search…" value="${h(query)}">
-      <select class="input" id="libSort" style="max-width:150px">
+      <select class="input" id="libSort" style="max-width:160px">
         <option value="title">A–Z</option>
         <option value="hours">Most played</option>
         <option value="recent">Recently played</option>
-        <option value="rating">Rating</option>
+        <option value="your_rating">Your Rating</option>
+        <option value="igdb_rating">IGDB Rating</option>
         <option value="added">Date added</option>
         <option value="replay">Want to Replay</option>
       </select>
@@ -278,11 +279,13 @@ export async function renderLibrary(restoreState = false) {
 
   function sortGames(arr) {
     return [...arr].sort((a,b)=>{
-      if (sortBy==='hours')  return (Number(b.total_hours)||0)-(Number(a.total_hours)||0);
-      if (sortBy==='recent') return (b.last_played||'').localeCompare(a.last_played||'');
-      if (sortBy==='rating') return (Number(b.rating)||0)-(Number(a.rating)||0);
-      if (sortBy==='added')  return (b.date_added||'').localeCompare(a.date_added||'');
-      if (sortBy==='replay') return (b.want_to_replay?1:0)-(a.want_to_replay?1:0);
+      if (sortBy==='hours')       return (Number(b.total_hours)||0)-(Number(a.total_hours)||0);
+      if (sortBy==='recent')      return (b.last_played||'').localeCompare(a.last_played||'');
+      if (sortBy==='rating')      return (Number(b.rating)||0)-(Number(a.rating)||0);       // legacy key compat
+      if (sortBy==='your_rating') return (Number(b.rating)||0)-(Number(a.rating)||0);
+      if (sortBy==='igdb_rating') return (Number(b.igdb_rating)||0)-(Number(a.igdb_rating)||0);
+      if (sortBy==='added')       return (b.date_added||'').localeCompare(a.date_added||'');
+      if (sortBy==='replay')      return (b.want_to_replay?1:0)-(a.want_to_replay?1:0);
       return (a.title||'').localeCompare(b.title||'');
     });
   }
@@ -417,7 +420,7 @@ export async function renderGameDetail(id) {
           ${coverAlts.length > 1 ? `<button class="cover-change-btn" id="changeCoverBtn" title="Change poster">🖼</button>` : ''}
         </div>
 
-        <!-- Section 10: Ratings block below poster -->
+        <!-- Ratings + HLTB block below poster -->
         <div class="game-ratings-block">
           <div class="game-hours-display">⏱ ${fmtHours(game.total_hours)}</div>
           ${game.rating ? `
@@ -432,6 +435,11 @@ export async function renderGameDetail(id) {
             <span class="game-rating-stars">${fmtStars(avgRating)}</span>
             <span class="game-rating-num">${avgRating} / 5</span>
           </div>` : ''}
+        </div>
+        <!-- Section 1: Time to Beat — loaded async after render -->
+        <div class="hltb-block" id="hltbBlock" style="display:none">
+          <div class="hltb-title">⏳ Time to Beat</div>
+          <div class="hltb-rows" id="hltbRows"></div>
         </div>
       </div>
 
@@ -579,6 +587,56 @@ export async function renderGameDetail(id) {
   document.getElementById('backToLibraryBtn').addEventListener('click', () => {
     _nav('library:restore');
   });
+
+  // Time to Beat: Fetch from IGDB asynchronously — never blocks render
+  (async () => {
+    const block = document.getElementById('hltbBlock');
+    const rows  = document.getElementById('hltbRows');
+    if (!block || !rows) return;
+
+    const devMode = localStorage.getItem('ll_dev_mode') === '1';
+    const devLogs = [];
+    const devLog  = devMode ? msg => devLogs.push(msg) : null;
+
+    const settings = await DB.getAllSettings(_user);
+    const hasIGDB  = !!(settings.igdb_client_id && settings.igdb_client_secret);
+
+    block.style.display = 'block';
+
+    if (!hasIGDB) {
+      rows.innerHTML = '<div class="hltb-no-data">Set IGDB credentials in Settings to enable time-to-beat data</div>';
+      return;
+    }
+
+    rows.innerHTML = '<div class="hltb-loading">Looking up…</div>';
+
+    try {
+      const ttb  = await fetchTimeToBeat(game, settings, { devLog });
+      const fmtH = v => v ? `${v}h` : '—';
+
+      if (!ttb || (!ttb.hastily && !ttb.normally && !ttb.completely)) {
+        rows.innerHTML = '<div class="hltb-no-data">No time-to-beat data on IGDB for this game</div>';
+        if (devMode && devLogs.length) {
+          rows.innerHTML += `<details class="hltb-dev-log"><summary>Debug log (${devLogs.length})</summary><pre>${devLogs.map(l=>h(l)).join('\n')}</pre></details>`;
+        }
+        return;
+      }
+
+      const rowsHtml = [
+        ttb.hastily    != null ? `<div class="hltb-row"><span class="hltb-label">Rushed</span><span class="hltb-val">${fmtH(ttb.hastily)}</span></div>`       : '',
+        ttb.normally   != null ? `<div class="hltb-row"><span class="hltb-label">Normally</span><span class="hltb-val">${fmtH(ttb.normally)}</span></div>`     : '',
+        ttb.completely != null ? `<div class="hltb-row"><span class="hltb-label">Completionist</span><span class="hltb-val">${fmtH(ttb.completely)}</span></div>` : '',
+      ].filter(Boolean).join('');
+
+      rows.innerHTML = rowsHtml || '<div class="hltb-no-data">No completion data available</div>';
+      if (devMode && devLogs.length) {
+        rows.innerHTML += `<details class="hltb-dev-log"><summary>Debug log</summary><pre>${devLogs.map(l=>h(l)).join('\n')}</pre></details>`;
+      }
+    } catch(e) {
+      rows.innerHTML = '<div class="hltb-no-data">Could not load completion data</div>';
+      if (devMode) rows.innerHTML += `<div class="hltb-dev-log" style="font-size:.7rem;color:var(--red);margin-top:.3rem">Error: ${h(e.message)}</div>`;
+    }
+  })();
 
   // Section 3: Prev/next game navigation
   document.getElementById('prevGameBtn')?.addEventListener('click', () => {
@@ -870,10 +928,17 @@ export async function renderGameForm(id) {
   document.getElementById('coverFileInput')?.addEventListener('change', e => {
     const file = e.target.files[0];
     if (!file) return;
+    // Section 2: open poster crop modal instead of directly using the file
     const reader = new FileReader();
     reader.onload = ev => {
-      coverInput.value = ev.target.result;
-      coverInput.dispatchEvent(new Event('input'));
+      const src = ev.target.result;
+      // Use the poster crop modal (2:3 ratio) from ui.js
+      import('./ui.js').then(({ openPosterCropModal }) => {
+        openPosterCropModal(src, croppedDataUrl => {
+          coverInput.value = croppedDataUrl;
+          coverInput.dispatchEvent(new Event('input'));
+        });
+      });
     };
     reader.readAsDataURL(file);
   });
@@ -2232,7 +2297,7 @@ export async function renderProfile() {
     const data = await DB.exportProfile(_user);
     const blob = new Blob([JSON.stringify(data,null,2)], { type:'application/json' });
     const url  = URL.createObjectURL(blob);
-    const a    = Object.assign(document.createElement('a'),{href:url,download:`gametracker_${_user}_${todayISO()}.json`});
+    const a    = Object.assign(document.createElement('a'),{href:url,download:`locallogger_${_user}_${todayISO()}.json`});
     a.click(); URL.revokeObjectURL(url);
     toast('Export downloaded!','success');
   };
@@ -2267,6 +2332,7 @@ export async function renderProfile() {
 ═══════════════════════════════════════════════════ */
 export async function renderSettings() {
   const s = await DB.getAllSettings(_user);
+  const devMode = localStorage.getItem('ll_dev_mode') === '1';
   const presets = [['#e8673c','Orange'],['#4a9eff','Blue'],['#9b59b6','Purple'],['#4caf7d','Green'],['#e05252','Red'],['#f0b840','Yellow'],['#e91e8c','Pink'],['#00bcd4','Cyan']];
   const accent  = s.accent_color||'#e8673c';
   const theme   = s.theme||'dark';
@@ -2430,18 +2496,19 @@ export async function renderSettings() {
         </div>
       </div>
 
-      <!-- Section 10: Debug Tools -->
-      <div class="form-card">
-        <div class="settings-section-title">🔧 Debug Tools</div>
-        <p style="font-size:.85rem;color:var(--text2);margin-bottom:1rem;line-height:1.6">
-          Tools for fixing or refreshing library data. These only update the specific field — other data is not touched.
+      <!-- Section 5: Developer Options (unlocked via Easter egg) -->
+      ${devMode ? `
+      <div class="form-card dev-options-card">
+        <div class="settings-section-title">🛠 Developer Options <span class="dev-badge">DEV</span></div>
+        <p style="font-size:.8rem;color:var(--text3);margin-bottom:1rem">
+          You've unlocked developer mode. These tools are safe but intended for debugging.
         </p>
 
         <!-- KV Request Monitor -->
         <div class="debug-tool-row">
           <div>
             <strong>☁️ KV Request Monitor</strong>
-            <p class="label-hint">Live counter of Cloudflare KV reads and writes since this tab opened. Helps diagnose unexpectedly high usage. Updates every 10 seconds.</p>
+            <p class="label-hint">Live counter of Cloudflare KV reads and writes. Helps diagnose high usage. Updates every 10 seconds.</p>
           </div>
           <button class="btn-outline" id="kvMonitorToggle">Show</button>
         </div>
@@ -2460,7 +2527,7 @@ export async function renderSettings() {
         <div class="debug-tool-row" style="margin-top:1.25rem">
           <div>
             <strong>Re-import all descriptions</strong>
-            <p class="label-hint">Re-fetches game descriptions from IGDB or Steam for every game in your library. Only overwrites the description field — your notes, ratings, and play data are safe.</p>
+            <p class="label-hint">Re-fetches game descriptions from IGDB or Steam. Only overwrites description — your notes and ratings are safe.</p>
           </div>
           <button class="btn-outline" id="reimportDescBtn">Run</button>
         </div>
@@ -2469,11 +2536,20 @@ export async function renderSettings() {
         <div class="debug-tool-row" style="margin-top:1.25rem">
           <div>
             <strong>Force sync push</strong>
-            <p class="label-hint">Manually push all your current data to the cloud sync relay right now.</p>
+            <p class="label-hint">Manually push all current data to the cloud sync relay.</p>
           </div>
           <button class="btn-outline" id="forceSyncPushBtn">Push</button>
         </div>
         <div id="forceSyncStatus" style="font-size:.8rem;color:var(--text3);margin-top:.5rem;display:none"></div>
+
+        <div class="debug-tool-row" style="margin-top:1.25rem">
+          <div>
+            <strong>Clear search cache</strong>
+            <p class="label-hint">Removes all cached search and time-to-beat results. Forces fresh lookups on next search.</p>
+          </div>
+          <button class="btn-outline" id="clearSearchCacheBtn">Clear</button>
+        </div>
+        <div id="clearCacheStatus" style="font-size:.8rem;color:var(--text3);margin-top:.5rem;display:none"></div>
 
         <div class="debug-tool-row" style="margin-top:1.25rem">
           <div>
@@ -2482,6 +2558,40 @@ export async function renderSettings() {
           </div>
           <button class="btn-outline" id="exportDataBtn">Export JSON</button>
         </div>
+
+        <div class="debug-tool-row" style="margin-top:1.25rem">
+          <div>
+            <strong>Inspect local data</strong>
+            <p class="label-hint">Show counts of all stored objects in IndexedDB.</p>
+          </div>
+          <button class="btn-outline" id="inspectDbBtn">Inspect</button>
+        </div>
+        <div id="inspectDbResult" style="font-size:.8rem;color:var(--text3);margin-top:.5rem;display:none"></div>
+
+        <div class="debug-tool-row" style="margin-top:1.25rem">
+          <div>
+            <strong>Re-import IGDB Ratings</strong>
+            <p class="label-hint">Fetches IGDB average ratings for all games in your library. Does not overwrite your personal ratings.</p>
+          </div>
+          <button class="btn-outline" id="reimportIGDBRatingsBtn">Run</button>
+        </div>
+        <div id="reimportIGDBRatingsStatus" style="font-size:.8rem;color:var(--text3);margin-top:.5rem;display:none"></div>
+        <div id="reimportIGDBRatingsLog" style="font-size:.72rem;font-family:var(--font-mono);color:var(--text3);margin-top:.35rem;max-height:160px;overflow-y:auto;display:none"></div>
+
+        <div class="debug-tool-row" style="margin-top:1.25rem">
+          <div>
+            <strong>Re-import Time to Beat</strong>
+            <p class="label-hint">Fetches IGDB time-to-beat data (Rushed / Normally / Completionist) for all library games. Requires IGDB credentials. Results cached per-game.</p>
+          </div>
+          <button class="btn-outline" id="reimportHLTBBtn">Run</button>
+        </div>
+        <div id="reimportHLTBStatus" style="font-size:.8rem;color:var(--text3);margin-top:.5rem;display:none"></div>
+        <div id="reimportHLTBLog" style="font-size:.72rem;font-family:var(--font-mono);color:var(--text3);margin-top:.35rem;max-height:160px;overflow-y:auto;display:none"></div>
+      </div>` : ''}
+
+      <!-- Section 6: Version number -->
+      <div style="text-align:center;padding:1.5rem 0 .5rem;color:var(--text3);font-size:.75rem;font-family:var(--font-mono)">
+        LocalLogger — Version 1.3
       </div>
 
     </div>`;
@@ -2615,15 +2725,22 @@ export async function renderSettings() {
     if (r.ok) {
       el.textContent = r.count > 0
         ? `✓ Connected — ${r.count} results for "Halo"`
-        : `⚠ Auth succeeded but 0 results returned. ${workerSaved ? 'Worker may need redeployment (update cloudflare-worker.js).' : 'Set your Worker URL in Cloud Sync above, then save and test again.'}`;
-      if (r.count === 0) el.className = 'igdb-test-result igdb-test-fail';
+        : `⚠ Auth succeeded but 0 results. Your credentials may need IGDB access enabled — see note below.`;
+      if (r.count === 0) {
+        el.className = 'igdb-test-result igdb-test-fail';
+        el.innerHTML = `⚠ Auth succeeded but search returned 0 results.<br><br>
+          <strong>Fix:</strong> Go to
+          <a href="https://api.igdb.com" target="_blank" style="color:inherit;text-decoration:underline">api.igdb.com</a>
+          and click <strong>Get a free key</strong> — you need to request IGDB API access separately from your Twitch app.
+          Once approved (usually instant), click Test again.`;
+      }
     } else {
-      el.textContent = `✗ ${r.error}${!workerSaved ? ' — No Worker URL set. Go to Cloud Sync above and save your Worker URL.' : ''}`;
+      el.textContent = `✗ ${r.error}`;
     }
   });
 
   // Section 10 + Section 1: Re-import descriptions debug tool
-  document.getElementById('reimportDescBtn').addEventListener('click', async () => {
+  document.getElementById('reimportDescBtn')?.addEventListener('click', async () => {
     const statusEl = document.getElementById('reimportDescStatus');
     statusEl.style.display='block'; statusEl.style.color='var(--text3)';
     statusEl.textContent='⏳ Starting…';
@@ -2647,7 +2764,7 @@ export async function renderSettings() {
   });
 
   // Section 10: Force sync push
-  document.getElementById('forceSyncPushBtn').addEventListener('click', async () => {
+  document.getElementById('forceSyncPushBtn')?.addEventListener('click', async () => {
     const statusEl = document.getElementById('forceSyncStatus');
     statusEl.style.display='block'; statusEl.textContent='⏳ Pushing…'; statusEl.style.color='var(--text3)';
     try {
@@ -2710,7 +2827,146 @@ export async function renderSettings() {
       </div>`;
   }
 
-  document.getElementById('kvMonitorToggle').addEventListener('click', () => {
+  // Section 4/5: Dev options button handlers
+  document.getElementById('clearSearchCacheBtn')?.addEventListener('click', async () => {
+    const statusEl = document.getElementById('clearCacheStatus');
+    statusEl.style.display = 'block';
+    statusEl.textContent = 'Clearing…';
+    try {
+      const { clearSearchCache } = await import('./db.js');
+      await clearSearchCache();
+      statusEl.textContent = '✓ Search and HLTB cache cleared. Next search will fetch fresh results.';
+    } catch(e) { statusEl.textContent = `✗ ${e.message}`; }
+  });
+
+  document.getElementById('inspectDbBtn')?.addEventListener('click', async () => {
+    const el = document.getElementById('inspectDbResult');
+    el.style.display = 'block'; el.textContent = 'Inspecting…';
+    try {
+      const games    = await DB.getGames(_user);
+      const sessions = await DB.getSessions(_user);
+      const wishlist = (await DB.getWishlist(_user)).length;
+      el.innerHTML = `Games: <strong>${games.length}</strong> · Sessions: <strong>${sessions.length}</strong> · Wishlist: <strong>${wishlist}</strong><br>User: <strong>${_user}</strong> · Dev mode: active`;
+    } catch(e) { el.textContent = `✗ ${e.message}`; }
+  });
+
+  // Re-import IGDB Ratings
+  document.getElementById('reimportIGDBRatingsBtn')?.addEventListener('click', async () => {
+    const statusEl = document.getElementById('reimportIGDBRatingsStatus');
+    const logEl    = document.getElementById('reimportIGDBRatingsLog');
+    statusEl.style.display = 'block';
+    logEl.style.display    = 'block';
+    logEl.innerHTML        = '';
+    statusEl.style.color   = 'var(--text3)';
+
+    const addLog = (msg, isError = false) => {
+      const line = document.createElement('div');
+      line.style.color = isError ? 'var(--red)' : '';
+      line.textContent = msg;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    const settings = await DB.getAllSettings(_user);
+    if (!settings.igdb_client_id || !settings.igdb_client_secret) {
+      statusEl.textContent = '✗ IGDB credentials not configured. Go to Settings → IGDB.';
+      statusEl.style.color = 'var(--red)';
+      return;
+    }
+
+    const games = (await DB.getGames(_user)).filter(g => g.status !== 'wishlist');
+    let updated = 0, skipped = 0, failed = 0;
+
+    statusEl.textContent = `⏳ Processing 0 / ${games.length}…`;
+
+    for (let i = 0; i < games.length; i++) {
+      const game = games[i];
+      statusEl.textContent = `⏳ ${i + 1} / ${games.length} — ${game.title}`;
+      try {
+        const result = await fetchIGDBRatingForGame(game, settings);
+        if (result?.rating) {
+          await DB.putGame(_user, { ...game, igdb_rating: result.rating, igdb_rating_count: result.count, updatedAt: new Date().toISOString() });
+          addLog(`✓ ${game.title} → ${result.rating}/100 (${result.count} votes)`);
+          updated++;
+        } else {
+          addLog(`— ${game.title}: no rating found`);
+          skipped++;
+        }
+      } catch(e) {
+        addLog(`✗ ${game.title}: ${e.message}`, true);
+        failed++;
+      }
+      // Rate-limit: 200ms between requests to stay under IGDB 4 req/s limit
+      await new Promise(r => setTimeout(r, 220));
+    }
+
+    await onDataChanged();
+    const color = updated > 0 ? 'var(--green)' : failed > 0 ? 'var(--red)' : 'var(--yellow)';
+    statusEl.textContent = `✓ Done — ${updated} updated, ${skipped} no data, ${failed} errors`;
+    statusEl.style.color = color;
+  });
+
+  // Re-import Time to Beat Data
+  document.getElementById('reimportHLTBBtn')?.addEventListener('click', async () => {
+    const statusEl = document.getElementById('reimportHLTBStatus');
+    const logEl    = document.getElementById('reimportHLTBLog');
+    statusEl.style.display = 'block';
+    logEl.style.display    = 'block';
+    logEl.innerHTML        = '';
+    statusEl.style.color   = 'var(--text3)';
+
+    const addLog = (msg, isError = false) => {
+      const line = document.createElement('div');
+      line.style.color = isError ? 'var(--red)' : '';
+      line.textContent = msg;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    const settings = await DB.getAllSettings(_user);
+    if (!settings.igdb_client_id || !settings.igdb_client_secret) {
+      statusEl.textContent = '✗ IGDB credentials required — set them in Settings first';
+      statusEl.style.color = 'var(--red)';
+      return;
+    }
+
+    const games = (await DB.getGames(_user)).filter(g => g.status !== 'wishlist');
+    let found = 0, notFound = 0, failed = 0;
+
+    statusEl.textContent = `⏳ Processing 0 / ${games.length}…`;
+
+    for (let i = 0; i < games.length; i++) {
+      const game = games[i];
+      statusEl.textContent = `⏳ ${i + 1} / ${games.length} — ${game.title}`;
+      const devLogs = [];
+      try {
+        const ttb = await fetchTimeToBeat(game, settings, { forceRefresh: true, devLog: msg => devLogs.push(msg) });
+        if (ttb && (ttb.hastily || ttb.normally || ttb.completely)) {
+          const parts = [];
+          if (ttb.hastily)    parts.push(`Rushed: ${ttb.hastily}h`);
+          if (ttb.normally)   parts.push(`Normal: ${ttb.normally}h`);
+          if (ttb.completely) parts.push(`100%: ${ttb.completely}h`);
+          addLog(`✓ ${game.title} → ${parts.join(', ')}`);
+          found++;
+        } else {
+          addLog(`— ${game.title}: no data`);
+          if (devLogs.length) devLogs.forEach(l => addLog(`  ${l}`));
+          notFound++;
+        }
+      } catch(e) {
+        addLog(`✗ ${game.title}: ${e.message}`, true);
+        failed++;
+      }
+      // IGDB rate limit: 4 req/s — 300ms gap is safe (two calls per game)
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    const color = found > 0 ? 'var(--green)' : failed > 0 ? 'var(--red)' : 'var(--yellow)';
+    statusEl.textContent = `✓ Done — ${found} found, ${notFound} no data, ${failed} errors`;
+    statusEl.style.color = color;
+  });
+
+  document.getElementById('kvMonitorToggle')?.addEventListener('click', () => {
     _kvOpen = !_kvOpen;
     const panel = document.getElementById('kvMonitorPanel');
     const btn   = document.getElementById('kvMonitorToggle');
@@ -2732,7 +2988,7 @@ export async function renderSettings() {
   });
 
   // Section 10: Export all data
-  document.getElementById('exportDataBtn').addEventListener('click', async () => {
+  document.getElementById('exportDataBtn')?.addEventListener('click', async () => {
     const [games, sessions, wishlist, favorites, settings2, profile] = await Promise.all([
       DB.getGames(_user), DB.getSessions(_user), DB.getWishlist(_user),
       DB.getFavorites(_user), DB.getAllSettings(_user), DB.getProfile(_user),

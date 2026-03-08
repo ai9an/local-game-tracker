@@ -4,7 +4,7 @@ import { openDB, getProfiles, createProfile, touchProfile, deleteProfile, getAll
 import * as Views from './views.js';
 import { toast, confirm, h } from './ui.js';
 import { initSync, startSync, stopSync, discoverRemoteProfiles } from './sync.js';
-import { setIGDBWorkerUrl } from './search.js';
+import { setIGDBWorkerUrl, warmIGDB } from './search.js';
 
 let currentUser  = null;
 let _isViewOnly  = false;
@@ -35,9 +35,9 @@ async function showProfileSelector() {
   app.innerHTML = `
     <div class="profile-screen">
       <div class="profile-screen-card">
-        <div class="profile-screen-logo">🎮</div>
-        <h1 class="profile-screen-title">Game Tracker</h1>
-        <p class="profile-screen-sub">Your personal gaming journal</p>
+        <div class="profile-screen-logo">📓</div>
+        <h1 class="profile-screen-title">LocalLogger</h1>
+        <p class="profile-screen-sub">Your local-first gaming journal</p>
 
         ${profiles.length ? `
         <div class="profile-list" id="profileList">
@@ -136,7 +136,7 @@ async function showProfileSelector() {
       }
       loginAs(viewName, true /* viewOnly */);
     } catch(err) {
-      toast('Could not load profile file — make sure it is a valid Game Tracker export', 'error');
+      toast('Could not load profile file — make sure it is a valid LocalLogger export', 'error');
     }
   });
 
@@ -193,6 +193,8 @@ async function loginAs(username, viewOnly = false) {
 
   // Give search.js the worker URL so IGDB calls route through it (fixes header stripping)
   setIGDBWorkerUrl(settings.sync_worker_url || null);
+  // Section 8: pre-warm IGDB token so first search is instant
+  warmIGDB(settings.igdb_client_id, settings.igdb_client_secret);
 
   // Start sync (only for non-view-only)
   if (!viewOnly) {

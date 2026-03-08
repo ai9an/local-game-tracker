@@ -39,10 +39,21 @@ async function proxiedFetch(targetUrl, timeoutMs = 10000) {
 let _warmed = false;
 export function warmProxies() {
   if (_warmed) return; _warmed = true;
+  // Warm Steam proxy so first search doesn't wait for cold-start
   proxiedFetch('https://store.steampowered.com/api/storesearch/?term=zelda&l=english&cc=GB', 6000)
     .catch(() => {});
 }
 warmProxies();
+
+/**
+ * Section 8: Pre-warm IGDB token when credentials are available.
+ * Called from app.js after login so the OAuth token is cached before
+ * the user types their first search query.
+ */
+export function warmIGDB(clientId, clientSecret) {
+  if (!clientId || !clientSecret) return;
+  igdbToken(clientId, clientSecret).catch(() => {});
+}
 
 /* ═══════════════════════════════════════════════════
    STEAM
@@ -297,8 +308,11 @@ async function igdbPost(endpoint, body, clientId, clientSecret) {
         _workerHasIGDB = true;
         const raw = await r.json();
         if (Array.isArray(raw)) return raw;
-        if (raw?.error) throw new Error(raw.error);
-        return raw;
+        // IGDB returned a non-array — usually an auth error like
+        // [{"title":"Unauthorized","status":401,"cause":"..."}]
+        // or {"message":"...","status":401}
+        const errMsg = raw?.message || raw?.[0]?.title || raw?.[0]?.cause || JSON.stringify(raw);
+        throw new Error(`IGDB API error: ${errMsg}`);
       }
     } catch(e) {
       // Network error or timeout — fall through to CORS proxy
@@ -509,6 +523,11 @@ export async function fetchDescriptionForGame(game, settings = {}) {
 }
 
 export async function testIGDB(clientId, clientSecret) {
+  // Force a fresh token — stale cached tokens are the most common cause of 0 results
+  _token    = null;
+  _tokenExp = 0;
+  // Also reset the worker capability flag so it re-tests
+  _workerHasIGDB = null;
   try {
     const r = await igdbSearch('Halo', clientId, clientSecret);
     return { ok: true, count: r.length };
@@ -557,4 +576,162 @@ export async function searchBrowse(query, settings = {}) {
     } catch(e) {}
   }
   try { return await steamSearch(query); } catch(e) { return []; }
+}
+
+/* ═══════════════════════════════════════════════════
+   TIME TO BEAT  (via IGDB /game_time_to_beats)
+   ─────────────────────────────────────────────────
+   IGDB exposes a game_time_to_beats endpoint with the
+   same three categories as HLTB: hastily / normally /
+   completely.  Values are in SECONDS.
+
+   This replaces the previous HLTB scraper approach which
+   relied on a rotating hash embedded in HLTB's Turbopack
+   JS bundles — not reliably discoverable server-side.
+
+   Requires: IGDB credentials (same ones used for search).
+   Caching:  7 days for found data, 1 day for misses.
+═══════════════════════════════════════════════════ */
+
+/** Convert IGDB seconds value to rounded hours */
+function _igdbSecs(v) {
+  if (!v || v <= 0) return null;
+  return Math.round((v / 3600) * 10) / 10;
+}
+
+/**
+ * Fetch time-to-beat data for a game via IGDB.
+ * Returns { hastily, normally, completely } in hours, or null.
+ *
+ * @param {object} game  — needs .slug (igdb:ID) or .title
+ * @param {object} settings — needs .igdb_client_id, .igdb_client_secret
+ * @param {{ forceRefresh?: boolean, devLog?: function }} opts
+ */
+export async function fetchTimeToBeat(game, settings = {}, { forceRefresh = false, devLog = null } = {}) {
+  if (!game?.title) return null;
+  const hasIGDB = settings.igdb_client_id && settings.igdb_client_secret;
+  if (!hasIGDB) {
+    devLog?.('⚠ No IGDB credentials — set Client ID and Secret in Settings');
+    return null;
+  }
+
+  const cacheKey = `ttb:${(game.slug || game.title).toLowerCase()}`;
+
+  if (!forceRefresh) {
+    const cached = await getCached(cacheKey, 7 * 24 * 3600 * 1000);
+    if (cached !== null) {
+      if (cached?.noData) return null;
+      return cached;
+    }
+  }
+
+  const _log  = msg => { devLog?.(msg);        console.info('[TTB]', msg); };
+  const _warn = msg => { devLog?.('⚠ ' + msg);  console.warn('[TTB]', msg); };
+
+  try {
+    // Step 1: Resolve IGDB game ID
+    let igdbId = null;
+
+    if (game.slug?.startsWith('igdb:')) {
+      igdbId = game.slug.split(':')[1];
+      _log(`Using stored IGDB id: ${igdbId}`);
+    } else {
+      // Search by title to get the IGDB id
+      const cleanQ = game.title.replace(/[®™©]/g, '').replace(/"/g, '').trim();
+      const rows   = await igdbPost(
+        'games',
+        `search "${cleanQ}"; fields id,name,slug; limit 5;`,
+        settings.igdb_client_id, settings.igdb_client_secret
+      );
+      if (rows?.length) {
+        const lc   = cleanQ.toLowerCase();
+        const best = rows.find(r => r.name?.toLowerCase() === lc)
+                  || rows.find(r => r.name?.toLowerCase().includes(lc))
+                  || rows[0];
+        igdbId = best?.id;
+        _log(`Title search matched: "${best?.name}" (id ${igdbId})`);
+      }
+    }
+
+    if (!igdbId) {
+      _warn(`Could not resolve IGDB id for "${game.title}"`);
+      await putCached(cacheKey, { noData: true });
+      return null;
+    }
+
+    // Step 2: Fetch game_time_to_beats
+    const ttbRows = await igdbPost(
+      'game_time_to_beats',
+      `fields hastily,normally,completely,game_id; where game_id = ${igdbId};`,
+      settings.igdb_client_id, settings.igdb_client_secret
+    );
+
+    if (!ttbRows?.length) {
+      _warn(`No time-to-beat data on IGDB for "${game.title}" (id ${igdbId})`);
+      await putCached(cacheKey, { noData: true });
+      return null;
+    }
+
+    const ttb = ttbRows[0];
+    const result = {
+      hastily:    _igdbSecs(ttb.hastily),
+      normally:   _igdbSecs(ttb.normally),
+      completely: _igdbSecs(ttb.completely),
+    };
+
+    if (result.hastily || result.normally || result.completely) {
+      _log(`Got times for "${game.title}": hastily=${result.hastily}h normally=${result.normally}h completely=${result.completely}h`);
+      await putCached(cacheKey, result);
+      return result;
+    }
+
+    _warn(`IGDB returned zero times for "${game.title}"`);
+    await putCached(cacheKey, { noData: true });
+    return null;
+
+  } catch(e) {
+    _warn(`fetchTimeToBeat error: ${e.message}`);
+    return null;
+  }
+}
+
+// Keep fetchHLTB as a tombstone so existing imports don't break at runtime —
+// it just delegates to fetchTimeToBeat (which needs settings, so returns null
+// when called the old way from cached code). Views.js is updated to call
+// fetchTimeToBeat directly.
+export async function fetchHLTB() { return null; }
+
+/* ── Fetch IGDB rating for a single game by title search ─────────
+   Used by the Re-import IGDB Ratings batch tool.
+   Returns the raw 0-100 IGDB score or null.
+*/
+export async function fetchIGDBRatingForGame(game, settings = {}) {
+  const hasIGDB = settings.igdb_client_id && settings.igdb_client_secret;
+  if (!hasIGDB) return null;
+
+  try {
+    // 1. If we have an IGDB slug, fetch directly
+    if (game.slug?.startsWith('igdb:')) {
+      const id = game.slug.split(':')[1];
+      const body = `fields total_rating,total_rating_count,name; where id = ${id};`;
+      const rows = await igdbPost('games', body, settings.igdb_client_id, settings.igdb_client_secret);
+      if (rows?.[0]?.total_rating) return { rating: Math.round(rows[0].total_rating), count: rows[0].total_rating_count || 0 };
+    }
+
+    // 2. Search by title
+    const cleanQ = game.title.replace(/"/g, '');
+    const body   = `search "${cleanQ}"; fields total_rating,total_rating_count,name; limit 5;`;
+    const rows   = await igdbPost('games', body, settings.igdb_client_id, settings.igdb_client_secret);
+    if (!rows?.length) return null;
+
+    // Best title match
+    const lc   = game.title.toLowerCase();
+    const best  = rows.find(r => r.name?.toLowerCase() === lc)
+               || rows.find(r => r.name?.toLowerCase().includes(lc))
+               || rows[0];
+    if (!best?.total_rating) return null;
+    return { rating: Math.round(best.total_rating), count: best.total_rating_count || 0 };
+  } catch(e) {
+    throw new Error(`IGDB rating fetch failed for "${game.title}": ${e.message}`);
+  }
 }
