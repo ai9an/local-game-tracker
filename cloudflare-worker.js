@@ -11,8 +11,7 @@
  * 5. Optionally change your workers URL
  * 6. Copy your worker URL (e.g. https://projectname.yourname.workers.dev)
  * 7. Paste it in Game Tracker → Settings → Sync → Worker URL → Save *
- * Free tier limits: 100,000 requests/day, 1GB KV storage — more than enough.
- *
+ * Free tier limits: 100,000 requests/day, 1GB KV storage — more than enough. *
  * ENDPOINTS
  * ─────────────────────────────────────────────────
  * GET  /ping              — health check

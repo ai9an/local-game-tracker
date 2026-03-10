@@ -19,6 +19,93 @@ export function init(username, navigateFn, viewOnly = false) {
   _viewOnly = viewOnly;
 }
 
+/* ═══════════════════════════════════════════════════════
+   UI CUSTOMIZATION SYSTEM
+   Reads saved settings and applies CSS classes + variables
+═══════════════════════════════════════════════════════ */
+export function applyUICustomization(s) {
+  const root = document.documentElement;
+  const body = document.body;
+
+  // Font
+  const fontMap = {
+    'dm-sans':  "'DM Sans', sans-serif",
+    'syne':     "'Syne', sans-serif",
+    'inter':    "'Inter', sans-serif",
+    'manrope':  "'Manrope', sans-serif",
+    'geist':    "'Geist', sans-serif"
+  };
+  const fontStack = fontMap[s.ui_font] || fontMap['dm-sans'];
+  root.style.setProperty('--font-body', fontStack);
+  // Lazy-load font if not default
+  if (s.ui_font && s.ui_font !== 'dm-sans') {
+    const fontUrls = {
+      syne:    'https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&display=swap',
+      inter:   'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap',
+      manrope: 'https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap',
+      geist:   'https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap'
+    };
+    if (fontUrls[s.ui_font] && !document.querySelector(`link[href*="${s.ui_font}"]`)) {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet'; link.href = fontUrls[s.ui_font];
+      document.head.appendChild(link);
+    }
+  }
+
+  // Card style
+  body.classList.remove('card-glass','card-solid','card-minimal','card-neon');
+  if (s.ui_card_style === 'solid')   body.classList.add('card-solid');
+  else if (s.ui_card_style === 'minimal') body.classList.add('card-minimal');
+  else if (s.ui_card_style === 'neon')    body.classList.add('card-neon');
+  else                               body.classList.add('card-glass');
+
+  // Background
+  const bgMap = {
+    default: ['#0a0a0d','#111116','rgba(16,16,22,0.75)'],
+    nebula:  ['#0d0a14','#140f20','rgba(16,12,28,0.75)'],
+    ocean:   ['#080d12','#0a1420','rgba(10,16,24,0.75)'],
+    forest:  ['#080d09','#0a1410','rgba(10,16,12,0.75)'],
+    pure:    ['#000000','#080808','rgba(8,8,8,0.82)'],
+    noise:   ['#0a0a0d','#111116','rgba(16,16,22,0.75)']
+  };
+  const bgs = bgMap[s.ui_bg_style] || bgMap.default;
+  root.style.setProperty('--bg',  bgs[0]);
+  root.style.setProperty('--bg2', bgs[1]);
+  root.style.setProperty('--bg-glass', bgs[2]);
+  body.classList.remove('bg-default','bg-nebula','bg-ocean','bg-forest','bg-pure','bg-noise');
+  body.classList.add(`bg-${s.ui_bg_style || 'default'}`);
+
+  // Density
+  body.classList.remove('density-compact','density-balanced','density-spacious');
+  body.classList.add(`density-${s.ui_density || 'balanced'}`);
+
+  // Poster size
+  const posterMap = { small:'130px', medium:'160px', large:'200px', xl:'240px' };
+  root.style.setProperty('--poster-size', posterMap[s.ui_poster_size] || '160px');
+
+  // Shadow
+  const shadowMap = {
+    none:   '0 0 0 rgba(0,0,0,0)',
+    soft:   '0 2px 12px rgba(0,0,0,0.25), 0 1px 2px rgba(0,0,0,0.15)',
+    medium: '0 4px 20px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3)',
+    deep:   '0 8px 40px rgba(0,0,0,0.6), 0 2px 8px rgba(0,0,0,0.5)'
+  };
+  root.style.setProperty('--shadow', shadowMap[s.ui_shadow] || shadowMap.medium);
+
+  // Animations
+  const animsOn = s.ui_anims !== 'false';
+  body.classList.toggle('reduce-motion', !animsOn);
+
+  // Animation speed
+  const speedMap = { fast:'80ms', normal:'150ms', slow:'260ms' };
+  root.style.setProperty('--ui-anim', speedMap[s.ui_anim_speed] || '150ms');
+}
+
+export async function loadAndApplyUISettings(username) {
+  const s = await DB.getAllSettings(username);
+  applyUICustomization(s);
+}
+
 function main() { return document.getElementById('app'); }
 
 /* ── Library state — persists across game detail views ── */
@@ -436,6 +523,9 @@ export async function renderGameDetail(id) {
             <span class="game-rating-num">${avgRating} / 5</span>
           </div>` : ''}
         </div>
+        <!-- Crop poster button — always visible -->
+        <button class="cover-crop-btn" id="cropCoverBtn">✂&nbsp; Crop / Reframe Poster</button>
+
         <!-- Section 1: Time to Beat — loaded async after render -->
         <div class="hltb-block" id="hltbBlock" style="display:none">
           <div class="hltb-title">⏳ Time to Beat</div>
@@ -564,6 +654,185 @@ export async function renderGameDetail(id) {
         </table>` : '<p style="color:var(--text3);font-size:.9rem">No sessions logged yet.</p>'}
       </div>
     </div>`;
+
+  // Crop poster button — fully self-contained, no external helper needed
+  document.getElementById('cropCoverBtn').addEventListener('click', async () => {
+    // Find the current cover image element
+    const imgEl = document.getElementById('heroCover');
+    if (!imgEl || imgEl.style.display === 'none') {
+      toast('No poster to crop — add a cover image first', 'error');
+      return;
+    }
+
+    // Get image src — works for data URLs and http URLs
+    const src = imgEl.src;
+    if (!src || src === window.location.href) {
+      toast('No poster loaded', 'error');
+      return;
+    }
+
+    // Convert any image to a data URL for the crop canvas.
+    // Key insight: the <img> element already has the pixels loaded in the browser.
+    // Drawing it to a canvas works even for IGDB/Steam URLs that block fetch() via CORS,
+    // because same-origin canvas tainting only matters if we try to *read* pixels from
+    // a canvas that had a cross-origin image drawn WITHOUT crossOrigin attribute set.
+    // The already-displayed imgEl has no crossOrigin attr, so we just draw it directly.
+    function getDataUrlFromImgEl(el) {
+      return new Promise((resolve, reject) => {
+        const c = document.createElement('canvas');
+        c.width  = el.naturalWidth  || el.width  || 400;
+        c.height = el.naturalHeight || el.height || 600;
+        // Wait for image to be fully decoded
+        if (el.complete && el.naturalWidth > 0) {
+          try {
+            c.getContext('2d').drawImage(el, 0, 0);
+            resolve(c.toDataURL('image/jpeg', 0.95));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          el.onload = () => {
+            try {
+              c.getContext('2d').drawImage(el, 0, 0);
+              resolve(c.toDataURL('image/jpeg', 0.95));
+            } catch (e) { reject(e); }
+          };
+          el.onerror = () => reject(new Error('Image failed to load'));
+        }
+      });
+    }
+
+    let cropSrc;
+    try {
+      if (src.startsWith('data:')) {
+        cropSrc = src; // already a data URL, use directly
+      } else {
+        // Draw the already-displayed <img> to canvas — bypasses CORS for display-only images
+        cropSrc = await getDataUrlFromImgEl(imgEl);
+      }
+    } catch (e) {
+      toast('Could not prepare poster for cropping: ' + e.message, 'error');
+      return;
+    }
+
+    // Build the crop modal inline — no import needed
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;padding:1rem;backdrop-filter:blur(8px)';
+    overlay.innerHTML = `
+      <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-xl);padding:1.5rem;max-width:500px;width:100%;box-shadow:var(--shadow-lg)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+          <h3 style="font-size:1rem;font-weight:600">✂ Crop Poster <span style="font-size:.75rem;color:var(--text3);font-weight:400">— drag to reposition</span></h3>
+          <button id="cropClose" style="background:none;border:none;color:var(--text3);font-size:1.4rem;cursor:pointer;line-height:1;padding:.2rem">×</button>
+        </div>
+        <div id="cropFrame" style="position:relative;width:100%;height:360px;background:#000;overflow:hidden;cursor:grab;border-radius:var(--radius);user-select:none">
+          <img id="cropImg" src="${cropSrc}" draggable="false" style="position:absolute;top:0;left:0;max-width:none;max-height:none;transform-origin:0 0">
+          <div id="cropGuide" style="position:absolute;top:50%;left:50%;width:160px;height:240px;transform:translate(-50%,-50%);border:2px solid var(--accent);box-shadow:0 0 0 9999px rgba(0,0,0,.6);pointer-events:none;border-radius:4px"></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:.75rem;margin:.85rem 0">
+          <span style="font-size:.78rem;color:var(--text2);min-width:2.5rem">Zoom</span>
+          <input type="range" id="cropZoom" min="0.5" max="4" step="0.05" value="1" style="flex:1;accent-color:var(--accent)">
+        </div>
+        <div style="display:flex;gap:.75rem;justify-content:flex-end">
+          <button id="cropCancel" class="btn-outline">Cancel</button>
+          <button id="cropConfirm" class="btn-primary">Use Cropped Poster</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const img   = overlay.querySelector('#cropImg');
+    const frame = overlay.querySelector('#cropFrame');
+    const guide = overlay.querySelector('#cropGuide');
+    const zoom  = overlay.querySelector('#cropZoom');
+
+    let scale = 1, ox = 0, oy = 0, dragging = false, startX = 0, startY = 0;
+
+    function clamp() {
+      const fw = frame.offsetWidth, fh = frame.offsetHeight;
+      const iw = img.naturalWidth * scale, ih = img.naturalHeight * scale;
+      // If image smaller than frame, allow it to float freely (don't clamp to edges)
+      if (iw <= fw) {
+        // centre horizontally, allow slight drag
+        ox = Math.max(-(iw * 0.1), Math.min(fw - iw * 0.9, ox));
+      } else {
+        ox = Math.min(0, Math.max(fw - iw, ox));
+      }
+      if (ih <= fh) {
+        oy = Math.max(-(ih * 0.1), Math.min(fh - ih * 0.9, oy));
+      } else {
+        oy = Math.min(0, Math.max(fh - ih, oy));
+      }
+    }
+    function applyTransform() {
+      img.style.transform = `translate(${ox}px,${oy}px) scale(${scale})`;
+    }
+
+    // Auto-fit: scale image so it fills the frame comfortably (whole image visible)
+    // Then the user zooms in to crop — intuitive and not zoomed-in by default
+    function initCrop() {
+      const fw = frame.offsetWidth, fh = frame.offsetHeight;
+      const iw = img.naturalWidth,  ih = img.naturalHeight;
+      if (!iw || !ih) return;
+
+      // Fit the whole image inside the frame with a small margin
+      const fitScale = Math.min((fw * 0.95) / iw, (fh * 0.95) / ih);
+      scale = fitScale;
+
+      // Zoom range: from fit-view down to 50% fit, up to 4x fit
+      zoom.min   = (fitScale * 0.5).toFixed(3);
+      zoom.max   = (fitScale * 4.0).toFixed(3);
+      zoom.step  = (fitScale * 0.05).toFixed(4);
+      zoom.value = scale.toFixed(3);
+
+      // Centre the image in the frame
+      ox = (fw - iw * scale) / 2;
+      oy = (fh - ih * scale) / 2;
+      applyTransform(); // don't clamp on init so image is centred even if smaller than frame
+    }
+
+    img.onload = () => initCrop();
+    // If image is already loaded (data URL sets src synchronously), call immediately
+    if (img.complete && img.naturalWidth > 0) initCrop();
+
+    zoom.addEventListener('input', () => { scale = parseFloat(zoom.value); clamp(); applyTransform(); });
+
+    frame.addEventListener('mousedown',  e => { dragging=true; startX=e.clientX-ox; startY=e.clientY-oy; frame.style.cursor='grabbing'; e.preventDefault(); });
+    document.addEventListener('mousemove', e => { if (!dragging) return; ox=e.clientX-startX; oy=e.clientY-startY; clamp(); applyTransform(); });
+    document.addEventListener('mouseup',   () => { dragging=false; frame.style.cursor='grab'; });
+    frame.addEventListener('touchstart', e => { dragging=true; startX=e.touches[0].clientX-ox; startY=e.touches[0].clientY-oy; }, {passive:true});
+    frame.addEventListener('touchmove',  e => { if (!dragging) return; ox=e.touches[0].clientX-startX; oy=e.touches[0].clientY-startY; clamp(); applyTransform(); e.preventDefault(); }, {passive:false});
+    frame.addEventListener('touchend',   () => dragging=false);
+
+    const cleanup = () => { overlay.remove(); };
+    overlay.querySelector('#cropClose').onclick  = cleanup;
+    overlay.querySelector('#cropCancel').onclick = cleanup;
+
+    overlay.querySelector('#cropConfirm').onclick = async () => {
+      // Crop to the guide rectangle
+      const gRect = guide.getBoundingClientRect();
+      const fRect = frame.getBoundingClientRect();
+      const gx = (gRect.left - fRect.left - ox) / scale;
+      const gy = (gRect.top  - fRect.top  - oy) / scale;
+      const gw = gRect.width  / scale;
+      const gh = gRect.height / scale;
+
+      const OUT_W = 400, OUT_H = 600;
+      const canvas = document.createElement('canvas');
+      canvas.width = OUT_W; canvas.height = OUT_H;
+      canvas.getContext('2d').drawImage(img, gx, gy, gw, gh, 0, 0, OUT_W, OUT_H);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+
+      game.cover_url = dataUrl;
+      await DB.putGame(_user, game);
+      await onDataChanged();
+      imgEl.src = dataUrl;
+
+      // Update all thumbnails of this game on the page
+      document.querySelectorAll(`[data-game-id="${game.id}"] img`).forEach(i => i.src = dataUrl);
+
+      cleanup();
+      toast('Poster cropped & saved!', 'success');
+    };
+  });
 
   // Cover picker
   document.getElementById('changeCoverBtn')?.addEventListener('click', () => openModal('coverModal'));
@@ -1697,50 +1966,150 @@ export async function renderSessionLogger() {
 /* ═══════════════════════════════════════════════════
    STATISTICS
 ═══════════════════════════════════════════════════ */
-export async function renderStats() {
+export async function renderStats(period) {
   const games    = await DB.getGames(_user);
   const sessions = await DB.getSessions(_user);
   const lib      = games.filter(g=>g.status!=='wishlist');
+  period = period || localStorage.getItem(`ll_stats_period_${_user}`) || 'lifetime';
 
-  const top_games   = [...lib].filter(g=>Number(g.total_hours)>0).sort((a,b)=>Number(b.total_hours)-Number(a.total_hours)).slice(0,10);
+  // Filter sessions by period
+  // Use local-date string comparison (YYYY-MM-DD) to avoid UTC timezone shift bugs
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  function cutoffStrForPeriod(p) {
+    if (p === 'weekly')  { const d=new Date(now); d.setDate(d.getDate()-7);           return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+    if (p === 'monthly') { const d=new Date(now); d.setMonth(d.getMonth()-1);          return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+    if (p === 'yearly')  { const d=new Date(now); d.setFullYear(d.getFullYear()-1);    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+    return null; // lifetime — no cutoff
+  }
+  const cutoffStr = cutoffStrForPeriod(period);
+  // s.date is already "YYYY-MM-DD" — compare as strings (lexicographic = chronological)
+  const filtSessions = cutoffStr ? sessions.filter(s => s.date >= cutoffStr) : sessions;
+
+  // Hours per game in this period (from filtered sessions)
+  const periodHoursMap = {};
+  filtSessions.forEach(s => {
+    if (!s.game_id) return;
+    periodHoursMap[s.game_id] = (periodHoursMap[s.game_id]||0) + (Number(s.duration)||0);
+  });
+  const periodTotalHours = Object.values(periodHoursMap).reduce((a,b)=>a+b, 0);
+
+  // Games active this period (had at least one session)
+  const activeGameIds = new Set(Object.keys(periodHoursMap));
+  const gamesThisPeriod = lib.filter(g => activeGameIds.has(g.id));
+
+  // Top games — by period hours (not total_hours which is all-time)
+  const top_games_period = period === 'lifetime'
+    ? [...lib].filter(g=>Number(g.total_hours)>0).sort((a,b)=>Number(b.total_hours)-Number(a.total_hours)).slice(0,10)
+    : gamesThisPeriod.sort((a,b)=>(periodHoursMap[b.id]||0)-(periodHoursMap[a.id]||0)).slice(0,10);
+
   const avg_rating  = lib.filter(g=>g.rating).length
     ? (lib.filter(g=>g.rating).reduce((t,g)=>t+Number(g.rating),0)/lib.filter(g=>g.rating).length).toFixed(2) : null;
   const status_counts = [...ALL_STATUSES].map(s=>({ status:s, cnt:lib.filter(g=>g.status===s).length }));
 
-  const now = new Date(); const weekMap={};
-  for (let i=11;i>=0;i--) {
-    const d = new Date(now); d.setDate(d.getDate()-i*7);
-    weekMap[d.toISOString().slice(0,10)] = 0;
+  // Sessions this period
+  const sesCount = filtSessions.length;
+  const avgPerSession = sesCount > 0 ? periodTotalHours / sesCount : 0;
+
+  // Build time-axis chart data — using local date strings throughout
+  function localDateStr(d) {
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   }
-  for (const s of sessions) {
-    const cutoff = new Date(); cutoff.setDate(cutoff.getDate()-84);
-    if (new Date(s.date) < cutoff) continue;
-    const nearest = Object.keys(weekMap).sort().reverse().find(k=>k<=s.date);
-    if (nearest) weekMap[nearest] += Number(s.duration)||0;
+  function buildTimeChart(p) {
+    const buckets = {};
+    let labelFn;
+    if (p === 'weekly') {
+      // Last 7 days, one bucket per day
+      labelFn = k => k.slice(5); // "MM-DD"
+      for (let i=6; i>=0; i--) { const d=new Date(now); d.setDate(d.getDate()-i); buckets[localDateStr(d)]=0; }
+    } else if (p === 'monthly') {
+      // 4 weekly buckets (week start dates)
+      labelFn = k => 'Wk ' + k.slice(5);
+      for (let i=3; i>=0; i--) {
+        const d=new Date(now); d.setDate(d.getDate()-i*7);
+        const dow=(d.getDay()+6)%7; d.setDate(d.getDate()-dow);
+        buckets[localDateStr(d)]=0;
+      }
+    } else if (p === 'yearly') {
+      // Last 12 months, one bucket per month
+      labelFn = k => k; // "YYYY-MM"
+      for (let i=11; i>=0; i--) { const d=new Date(now); d.setMonth(d.getMonth()-i); d.setDate(1); buckets[`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`]=0; }
+    } else {
+      // Lifetime — group by month, show last 12 months of data
+      labelFn = k => k;
+      for (let i=11; i>=0; i--) { const d=new Date(now); d.setMonth(d.getMonth()-i); d.setDate(1); buckets[`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`]=0; }
+    }
+
+    // Accumulate sessions into buckets using local date strings
+    const bucketKeys = Object.keys(buckets).sort();
+    filtSessions.forEach(s => {
+      if (!s.date) return;
+      const dur = Number(s.duration)||0;
+      if (p === 'weekly') {
+        // Direct daily match
+        if (buckets[s.date] !== undefined) buckets[s.date] += dur;
+      } else if (p === 'monthly') {
+        // Find nearest week-start bucket that is <= s.date
+        const nearest = bucketKeys.slice().reverse().find(k => k <= s.date);
+        if (nearest !== undefined) buckets[nearest] += dur;
+      } else {
+        // Group by month "YYYY-MM"
+        const monthKey = s.date.slice(0,7);
+        if (buckets[monthKey] !== undefined) buckets[monthKey] += dur;
+      }
+    });
+
+    return Object.entries(buckets).sort().map(([k,v]) => [labelFn(k), v]);
   }
-  const weekData = Object.entries(weekMap).sort();
+  const timeData = buildTimeChart(period);
+  const chartLabel = { weekly:'Daily Playtime — last 7 days', monthly:'Daily Playtime — last 30 days', yearly:'Monthly Playtime — this year', lifetime:'Monthly Playtime — all time' }[period];
 
   main().innerHTML = `
     <div class="page-header"><h1>Statistics</h1></div>
+
+    <!-- Time period tabs -->
+    <div class="stats-period-tabs" id="statsPeriodTabs">
+      <button class="stats-tab${period==='weekly'?' active':''}"   data-period="weekly">Week</button>
+      <button class="stats-tab${period==='monthly'?' active':''}"  data-period="monthly">Month</button>
+      <button class="stats-tab${period==='yearly'?' active':''}"   data-period="yearly">Year</button>
+      <button class="stats-tab${period==='lifetime'?' active':''}" data-period="lifetime">All Time</button>
+    </div>
+
     <div class="stat-tiles">
-      <div class="stat-tile"><div class="stat-tile-val">${lib.length}</div><div class="stat-tile-label">Games tracked</div></div>
-      <div class="stat-tile"><div class="stat-tile-val">${lib.filter(g=>g.status==='completed'||g.status==='100%').length}</div><div class="stat-tile-label">Completed</div></div>
-      <div class="stat-tile"><div class="stat-tile-val">${lib.filter(g=>g.status==='100%').length > 0 ? `<span style="color:var(--gold)">💯 ${lib.filter(g=>g.status==='100%').length}</span>` : '—'}</div><div class="stat-tile-label">100% Completed</div></div>
-      <div class="stat-tile"><div class="stat-tile-val">${fmtHours(lib.reduce((t,g)=>t+(Number(g.total_hours)||0),0))}</div><div class="stat-tile-label">Total hours</div></div>
-      <div class="stat-tile"><div class="stat-tile-val">${avg_rating?`★${avg_rating}`:'—'}</div><div class="stat-tile-label">Avg rating</div></div>
+      <div class="stat-tile">
+        <div class="stat-tile-val">${period==='lifetime' ? lib.length : gamesThisPeriod.length}</div>
+        <div class="stat-tile-label">${period==='lifetime' ? 'Games tracked' : 'Games played'}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile-val">${fmtHours(periodTotalHours)}</div>
+        <div class="stat-tile-label">${period==='lifetime'?'Total hours':'Hours this period'}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile-val">${sesCount}</div>
+        <div class="stat-tile-label">${period==='lifetime'?'Total sessions':'Sessions'}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile-val">${sesCount > 0 ? fmtHours(avgPerSession) : '—'}</div>
+        <div class="stat-tile-label">Avg session</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile-val">${lib.filter(g=>g.status==='completed'||g.status==='100%').length}</div>
+        <div class="stat-tile-label">Completed (all time)</div>
+      </div>
     </div>
 
     <div class="two-col mt-lg">
       <div class="card">
-        <div class="card-head"><h3>Most Played</h3></div>
+        <div class="card-head"><h3>${period==='lifetime'?'Most Played':'Top Games (period)'}</h3></div>
         <div class="card-body">
-          ${top_games.length ? `<div class="chart-bars">
-            ${top_games.map(g=>{
-              const max = Number(top_games[0].total_hours)||1;
-              const pct = Math.round((Number(g.total_hours)/max)*100);
-              return `<div class="bar-item"><span class="bar-label">${completionIcon(g.status)} ${h(g.title)}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><span class="bar-val">${fmtHours(g.total_hours)}</span></div>`;
+          ${top_games_period.length ? `<div class="chart-bars">
+            ${top_games_period.map(g=>{
+              const hrs = period==='lifetime' ? Number(g.total_hours)||0 : (periodHoursMap[g.id]||0);
+              const max = period==='lifetime' ? Number(top_games_period[0].total_hours)||1 : Math.max(...top_games_period.map(x=>periodHoursMap[x.id]||0),1);
+              const pct = Math.round((hrs/max)*100);
+              return `<div class="bar-item"><span class="bar-label">${completionIcon(g.status)} ${h(g.title)}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><span class="bar-val">${fmtHours(hrs)}</span></div>`;
             }).join('')}
-          </div>` : '<p style="color:var(--text3)">No hours logged yet.</p>'}
+          </div>` : `<p style="color:var(--text3);font-size:.9rem">No sessions in this period.</p>`}
         </div>
       </div>
       <div class="card">
@@ -1758,25 +2127,64 @@ export async function renderStats() {
     </div>
 
     <div class="card mt-lg">
-      <div class="card-head"><h3>Weekly Playtime (last 12 weeks)</h3></div>
+      <div class="card-head"><h3>${chartLabel}</h3></div>
       <div class="card-body">
-        ${weekData.every(([,v])=>v===0) ? '<p style="color:var(--text3)">No sessions in this period.</p>' : `
+        ${timeData.every(([,v])=>v===0) ? '<p style="color:var(--text3)">No sessions in this period.</p>' : `
         <div class="chart-bars">
-          ${weekData.map(([wk,hrs])=>{
-            const max = Math.max(...weekData.map(([,v])=>v),1);
+          ${timeData.map(([lbl,hrs])=>{
+            const max = Math.max(...timeData.map(([,v])=>v),1);
             const pct = Math.round((hrs/max)*100);
-            return `<div class="bar-item"><span class="bar-label" style="min-width:90px;font-size:.72rem">${wk.slice(5)}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><span class="bar-val">${fmtHours(hrs)}</span></div>`;
+            return `<div class="bar-item"><span class="bar-label" style="min-width:80px;font-size:.72rem">${lbl}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><span class="bar-val">${fmtHours(hrs)}</span></div>`;
           }).join('')}
         </div>`}
       </div>
-    </div>`;
+    </div>
 
+    ${avg_rating ? `
+    <div class="two-col mt-lg">
+      <div class="card">
+        <div class="card-head"><h3>Rating Distribution</h3></div>
+        <div class="card-body">
+          <div class="rating-curve">
+            ${[1,1.5,2,2.5,3,3.5,4,4.5,5].map(r=>{
+              const cnt = lib.filter(g=>Math.abs(Number(g.rating)-r)<0.26).length;
+              const maxCnt = Math.max(...[1,1.5,2,2.5,3,3.5,4,4.5,5].map(x=>lib.filter(g=>Math.abs(Number(g.rating)-x)<0.26).length),1);
+              const h2 = Math.max(Math.round((cnt/maxCnt)*80),2);
+              return `<div class="rating-curve-col"><div class="rating-curve-bar-wrap"><div class="rating-curve-bar" style="height:${h2}px"></div></div><div class="rating-curve-count">${cnt||''}</div><div class="rating-curve-label">${r}</div></div>`;
+            }).join('')}
+          </div>
+          <p style="margin-top:1rem;font-size:.82rem;color:var(--text2)">Avg: <strong style="color:var(--accent)">★ ${avg_rating}</strong> across ${lib.filter(g=>g.rating).length} rated games</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Session Stats</h3></div>
+        <div class="card-body">
+          <div class="chart-bars">
+            <div class="bar-item"><span class="bar-label">Total sessions</span><div class="bar-track"><div class="bar-fill" style="width:100%"></div></div><span class="bar-val">${sessions.length}</span></div>
+            <div class="bar-item"><span class="bar-label">Avg session</span><div class="bar-track"><div class="bar-fill" style="width:60%"></div></div><span class="bar-val">${sessions.length?fmtHours(sessions.reduce((a,s)=>a+(Number(s.duration)||0),0)/sessions.length):'—'}</span></div>
+            <div class="bar-item"><span class="bar-label">Period sessions</span><div class="bar-track"><div class="bar-fill" style="width:${Math.min(100,Math.round(sesCount/Math.max(sessions.length,1)*100))}%"></div></div><span class="bar-val">${sesCount}</span></div>
+            <div class="bar-item"><span class="bar-label">Avg/session (period)</span><div class="bar-track"><div class="bar-fill" style="width:50%"></div></div><span class="bar-val">${sesCount?fmtHours(avgPerSession):'—'}</span></div>
+          </div>
+        </div>
+      </div>
+    </div>` : ''}`;
+
+  // Animate bars
   setTimeout(()=>{
     document.querySelectorAll('.bar-fill').forEach(b=>{
       const w=b.style.width; b.style.width='0'; b.style.transition='none';
       requestAnimationFrame(()=>requestAnimationFrame(()=>{ b.style.transition='width .9s cubic-bezier(.4,0,.2,1)'; b.style.width=w; }));
     });
   }, 80);
+
+  // Period tab handlers
+  document.querySelectorAll('#statsPeriodTabs .stats-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const p = tab.dataset.period;
+      localStorage.setItem(`ll_stats_period_${_user}`, p);
+      renderStats(p);
+    });
+  });
 }
 
 /* ═══════════════════════════════════════════════════
@@ -2333,7 +2741,12 @@ export async function renderProfile() {
 export async function renderSettings() {
   const s = await DB.getAllSettings(_user);
   const devMode = localStorage.getItem('ll_dev_mode') === '1';
-  const presets = [['#e8673c','Orange'],['#4a9eff','Blue'],['#9b59b6','Purple'],['#4caf7d','Green'],['#e05252','Red'],['#f0b840','Yellow'],['#e91e8c','Pink'],['#00bcd4','Cyan']];
+  const presets = [
+    ['#e8673c','Orange'],['#4a9eff','Blue'],['#9b59b6','Purple'],
+    ['#4caf7d','Green'],['#e05252','Red'],['#f0b840','Yellow'],
+    ['#e91e8c','Pink'],['#00bcd4','Cyan'],['#ff6b35','Ember'],
+    ['#a78bfa','Lavender'],['#34d399','Mint'],['#fb923c','Peach']
+  ];
   const accent  = s.accent_color||'#e8673c';
   const theme   = s.theme||'dark';
   const igdbCid = s.igdb_client_id||'';
@@ -2341,12 +2754,20 @@ export async function renderSettings() {
   const syncOn  = s.sync_enabled==='true';
   const ratingDisplay = s.rating_display||'stars';
   const logDefaultEnd = s.log_default_end_to_now !== 'false';
+  const uiDensity    = s.ui_density    || 'balanced';
+  const uiBgStyle    = s.ui_bg_style   || 'default';
+  const uiAnimSpeed  = s.ui_anim_speed || 'normal';
+  const uiCardStyle  = s.ui_card_style || 'glass';
+  const uiPosterSize = s.ui_poster_size|| 'medium';
+  const uiFont       = s.ui_font       || 'dm-sans';
+  const uiShadow     = s.ui_shadow     || 'medium';
+  const uiAnimsOn    = s.ui_anims      !== 'false';
 
   main().innerHTML = `
     <div class="page-header"><h1>Settings</h1></div>
     <div class="settings-layout">
 
-      <!-- Appearance -->
+      <!-- Appearance + UI Customization -->
       <div class="form-card">
         <div class="settings-section-title">🎨 Appearance</div>
         <div class="form-group mb-lg">
@@ -2369,6 +2790,116 @@ export async function renderSettings() {
           </div>
         </div>
         <button class="btn-primary" id="saveAppearance">Save Appearance</button>
+      </div>
+
+      <!-- UI Customization — expanded panel -->
+      <div class="form-card">
+        <div class="settings-section-title">✨ Interface Customization</div>
+
+        <!-- Font -->
+        <div class="form-group mb-lg">
+          <label>Interface Font</label>
+          <div class="ui-btn-group" id="fontGroup">
+            <button class="ui-btn${uiFont==='dm-sans'?' active':''}" data-font="dm-sans">DM Sans</button>
+            <button class="ui-btn${uiFont==='syne'?' active':''}" data-font="syne">Syne</button>
+            <button class="ui-btn${uiFont==='inter'?' active':''}" data-font="inter">Inter</button>
+            <button class="ui-btn${uiFont==='manrope'?' active':''}" data-font="manrope">Manrope</button>
+            <button class="ui-btn${uiFont==='geist'?' active':''}" data-font="geist">Geist</button>
+          </div>
+        </div>
+
+        <!-- Card style -->
+        <div class="form-group mb-lg">
+          <label>Card Style</label>
+          <div class="ui-btn-group" id="cardStyleGroup">
+            <button class="ui-btn${uiCardStyle==='glass'?' active':''}" data-cardstyle="glass">Glass</button>
+            <button class="ui-btn${uiCardStyle==='solid'?' active':''}" data-cardstyle="solid">Solid</button>
+            <button class="ui-btn${uiCardStyle==='minimal'?' active':''}" data-cardstyle="minimal">Minimal</button>
+            <button class="ui-btn${uiCardStyle==='neon'?' active':''}" data-cardstyle="neon">Neon</button>
+          </div>
+        </div>
+
+        <!-- Background -->
+        <div class="form-group mb-lg">
+          <label>Background Style</label>
+          <div class="bg-swatch-grid" id="bgStyleGroup">
+            <div class="bg-swatch${uiBgStyle==='default'?' active':''}" data-bg="default">
+              <div class="bg-swatch-preview" style="background:linear-gradient(135deg,#0a0a0d,#111116)"></div>Default
+            </div>
+            <div class="bg-swatch${uiBgStyle==='nebula'?' active':''}" data-bg="nebula">
+              <div class="bg-swatch-preview" style="background:linear-gradient(135deg,#0d0a14,#140f20)"></div>Nebula
+            </div>
+            <div class="bg-swatch${uiBgStyle==='ocean'?' active':''}" data-bg="ocean">
+              <div class="bg-swatch-preview" style="background:linear-gradient(135deg,#080d12,#0a1420)"></div>Ocean
+            </div>
+            <div class="bg-swatch${uiBgStyle==='forest'?' active':''}" data-bg="forest">
+              <div class="bg-swatch-preview" style="background:linear-gradient(135deg,#080d09,#0a1410)"></div>Forest
+            </div>
+            <div class="bg-swatch${uiBgStyle==='pure'?' active':''}" data-bg="pure">
+              <div class="bg-swatch-preview" style="background:#000000"></div>Pure Black
+            </div>
+            <div class="bg-swatch${uiBgStyle==='noise'?' active':''}" data-bg="noise">
+              <div class="bg-swatch-preview" style="background:repeating-linear-gradient(45deg,#111 0,#111 2px,#0a0a0d 2px,#0a0a0d 8px)"></div>Noise
+            </div>
+          </div>
+        </div>
+
+        <!-- Density -->
+        <div class="form-group mb-lg">
+          <label>Spacing Density</label>
+          <div class="ui-btn-group" id="densityGroup">
+            <button class="ui-btn${uiDensity==='compact'?' active':''}" data-density="compact">Compact</button>
+            <button class="ui-btn${uiDensity==='balanced'?' active':''}" data-density="balanced">Balanced</button>
+            <button class="ui-btn${uiDensity==='spacious'?' active':''}" data-density="spacious">Spacious</button>
+          </div>
+        </div>
+
+        <!-- Poster size -->
+        <div class="form-group mb-lg">
+          <label>Poster Size</label>
+          <div class="ui-btn-group" id="posterSizeGroup">
+            <button class="ui-btn${uiPosterSize==='small'?' active':''}" data-postersize="small">Small</button>
+            <button class="ui-btn${uiPosterSize==='medium'?' active':''}" data-postersize="medium">Medium</button>
+            <button class="ui-btn${uiPosterSize==='large'?' active':''}" data-postersize="large">Large</button>
+            <button class="ui-btn${uiPosterSize==='xl'?' active':''}" data-postersize="xl">XL</button>
+          </div>
+        </div>
+
+        <!-- Shadow -->
+        <div class="form-group mb-lg">
+          <label>Shadow Depth</label>
+          <div class="ui-btn-group" id="shadowGroup">
+            <button class="ui-btn${uiShadow==='none'?' active':''}" data-shadow="none">None</button>
+            <button class="ui-btn${uiShadow==='soft'?' active':''}" data-shadow="soft">Soft</button>
+            <button class="ui-btn${uiShadow==='medium'?' active':''}" data-shadow="medium">Medium</button>
+            <button class="ui-btn${uiShadow==='deep'?' active':''}" data-shadow="deep">Deep</button>
+          </div>
+        </div>
+
+        <!-- Animations -->
+        <div class="form-group mb-lg">
+          <label>Animations</label>
+          <div class="ui-btn-group" id="animGroup">
+            <button class="ui-btn${uiAnimsOn?' active':''}" data-anim="on">✨ On</button>
+            <button class="ui-btn${!uiAnimsOn?' active':''}" data-anim="off">Off</button>
+          </div>
+          <p class="label-hint" style="margin-top:.3rem">Disable for better performance or accessibility.</p>
+        </div>
+
+        <!-- Animation speed -->
+        <div class="form-group mb-lg">
+          <label>Animation Speed</label>
+          <div class="ui-btn-group" id="animSpeedGroup">
+            <button class="ui-btn${uiAnimSpeed==='fast'?' active':''}" data-animspeed="fast">Fast</button>
+            <button class="ui-btn${uiAnimSpeed==='normal'?' active':''}" data-animspeed="normal">Normal</button>
+            <button class="ui-btn${uiAnimSpeed==='slow'?' active':''}" data-animspeed="slow">Slow</button>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:center">
+          <button class="btn-primary" id="saveUICustom">Save & Apply</button>
+          <button class="btn-outline" id="resetUICustom">Reset Defaults</button>
+        </div>
       </div>
 
       <!-- Section 10: Rating display -->
@@ -2591,7 +3122,7 @@ export async function renderSettings() {
 
       <!-- Section 6: Version number -->
       <div style="text-align:center;padding:1.5rem 0 .5rem;color:var(--text3);font-size:.75rem;font-family:var(--font-mono)">
-        LocalLogger — Version 1.3
+        LocalLogger — Version 1.4
       </div>
 
     </div>`;
@@ -2640,6 +3171,57 @@ export async function renderSettings() {
     const val = document.querySelector('[data-rating].active')?.dataset.rating || 'stars';
     await DB.setSetting(_user, 'rating_display', val);
     toast('Rating display saved!', 'success');
+  });
+
+  // ── UI Customization handlers ──
+  function uiBtnGroupHandler(groupId, attrName) {
+    document.querySelectorAll(`#${groupId} .ui-btn`).forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll(`#${groupId} .ui-btn`).forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+      });
+    });
+  }
+  ['fontGroup','cardStyleGroup','densityGroup','posterSizeGroup','shadowGroup','animGroup','animSpeedGroup'].forEach(g => uiBtnGroupHandler(g, g));
+
+  document.querySelectorAll('#bgStyleGroup .bg-swatch').forEach(sw => {
+    sw.addEventListener('click', () => {
+      document.querySelectorAll('#bgStyleGroup .bg-swatch').forEach(s=>s.classList.remove('active'));
+      sw.classList.add('active');
+    });
+  });
+
+  document.getElementById('saveUICustom').addEventListener('click', async () => {
+    const font       = document.querySelector('#fontGroup .ui-btn.active')?.dataset.font || 'dm-sans';
+    const cardStyle  = document.querySelector('#cardStyleGroup .ui-btn.active')?.dataset.cardstyle || 'glass';
+    const bgStyle    = document.querySelector('#bgStyleGroup .bg-swatch.active')?.dataset.bg || 'default';
+    const density    = document.querySelector('#densityGroup .ui-btn.active')?.dataset.density || 'balanced';
+    const posterSize = document.querySelector('#posterSizeGroup .ui-btn.active')?.dataset.postersize || 'medium';
+    const shadow     = document.querySelector('#shadowGroup .ui-btn.active')?.dataset.shadow || 'medium';
+    const animOn     = document.querySelector('#animGroup .ui-btn.active')?.dataset.anim !== 'off';
+    const animSpeed  = document.querySelector('#animSpeedGroup .ui-btn.active')?.dataset.animspeed || 'normal';
+    await DB.setSetting(_user,'ui_font',font);
+    await DB.setSetting(_user,'ui_card_style',cardStyle);
+    await DB.setSetting(_user,'ui_bg_style',bgStyle);
+    await DB.setSetting(_user,'ui_density',density);
+    await DB.setSetting(_user,'ui_poster_size',posterSize);
+    await DB.setSetting(_user,'ui_shadow',shadow);
+    await DB.setSetting(_user,'ui_anims',animOn?'true':'false');
+    await DB.setSetting(_user,'ui_anim_speed',animSpeed);
+    applyUICustomization({ ui_font:font, ui_card_style:cardStyle, ui_bg_style:bgStyle,
+      ui_density:density, ui_poster_size:posterSize, ui_shadow:shadow,
+      ui_anims:animOn?'true':'false', ui_anim_speed:animSpeed });
+    toast('Interface settings saved!','success');
+  });
+
+  document.getElementById('resetUICustom').addEventListener('click', async () => {
+    const defaults = { ui_font:'dm-sans', ui_card_style:'glass', ui_bg_style:'default',
+      ui_density:'balanced', ui_poster_size:'medium', ui_shadow:'medium',
+      ui_anims:'true', ui_anim_speed:'normal' };
+    for (const [k,v] of Object.entries(defaults)) await DB.setSetting(_user,k,v);
+    applyUICustomization(defaults);
+    toast('Reset to defaults!','info');
+    renderSettings();
   });
 
   // Section 10: Logging settings

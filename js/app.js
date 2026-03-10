@@ -190,6 +190,8 @@ async function loginAs(username, viewOnly = false) {
   }
 
   Views.init(username, navigate, viewOnly);
+  // Apply saved UI customization settings immediately
+  await Views.loadAndApplyUISettings(username);
 
   // Give search.js the worker URL so IGDB calls route through it (fixes header stripping)
   setIGDBWorkerUrl(settings.sync_worker_url || null);
