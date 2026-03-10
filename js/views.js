@@ -764,20 +764,24 @@ export async function renderGameDetail(id) {
     let scale = 1, ox = 0, oy = 0, dragging = false, startX = 0, startY = 0;
 
     function clamp() {
+      // Fully free panning — the only limit is that at least the guide box
+      // must be able to reach any part of the image, so we allow the image
+      // to travel far enough that the guide (centred in frame) can cover the edges.
+      // In practice: allow image to pan so its edges can reach the guide centre.
       const fw = frame.offsetWidth, fh = frame.offsetHeight;
       const iw = img.naturalWidth * scale, ih = img.naturalHeight * scale;
-      // If image smaller than frame, allow it to float freely (don't clamp to edges)
-      if (iw <= fw) {
-        // centre horizontally, allow slight drag
-        ox = Math.max(-(iw * 0.1), Math.min(fw - iw * 0.9, ox));
-      } else {
-        ox = Math.min(0, Math.max(fw - iw, ox));
-      }
-      if (ih <= fh) {
-        oy = Math.max(-(ih * 0.1), Math.min(fh - ih * 0.9, oy));
-      } else {
-        oy = Math.min(0, Math.max(fh - ih, oy));
-      }
+      const gw = guide.offsetWidth,  gh = guide.offsetHeight;
+      const guideCx = fw / 2, guideCy = fh / 2;
+
+      // Max pan: image right edge can reach guide centre (so guide can sit at image right edge)
+      // Min pan: image left edge can reach guide centre (guide can sit at image left edge)
+      const minOx = guideCx - iw;  // image right edge at guide centre
+      const maxOx = guideCx;       // image left edge at guide centre
+      const minOy = guideCy - ih;
+      const maxOy = guideCy;
+
+      ox = Math.max(minOx, Math.min(maxOx, ox));
+      oy = Math.max(minOy, Math.min(maxOy, oy));
     }
     function applyTransform() {
       img.style.transform = `translate(${ox}px,${oy}px) scale(${scale})`;
@@ -3139,7 +3143,7 @@ export async function renderSettings() {
 
       <!-- Section 6: Version number -->
       <div style="text-align:center;padding:1.5rem 0 .5rem;color:var(--text3);font-size:.75rem;font-family:var(--font-mono)">
-        LocalLogger — Version 1.4.1
+        LocalLogger — Version 1.4.2
       </div>
 
     </div>`;

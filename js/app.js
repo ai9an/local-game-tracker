@@ -9,6 +9,127 @@ import { setIGDBWorkerUrl, warmIGDB } from './search.js';
 let currentUser  = null;
 let _isViewOnly  = false;
 
+/* ═══════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════ */
+const APP_VERSION = '1.4.2';
+
+const WHATS_NEW = [
+  {
+    emoji: '✨',
+    title: 'Cinematic UI Redesign',
+    body: 'Completely new dark glass aesthetic — DM Sans font, glow accents, and smooth animations throughout.'
+  },
+  {
+    emoji: '🎨',
+    title: 'Interface Customization',
+    body: 'New Settings panel: choose your font, card style, background, density, poster size, shadow depth, and animation speed.'
+  },
+  {
+    emoji: '✂️',
+    title: 'Poster Cropping',
+    body: 'Crop and reframe any game poster — IGDB covers, Steam covers, or custom uploads — directly from the game detail page.'
+  },
+  {
+    emoji: '📊',
+    title: 'Stats Time Filters',
+    body: 'Filter your Statistics page by Week, Month, Year, or All Time to see playtime and sessions for any period.'
+  },
+  {
+    emoji: '🎨',
+    title: 'More Accent Colours',
+    body: 'Four new accent presets: Ember, Lavender, Mint, and Peach — plus the existing eight.'
+  }
+];
+/* ── END OF WHAT'S NEW BLOCK ──────────────────────── */
+
+function showWhatsNewIfNeeded(username) {
+  const key = `ll_seen_version_${username}`;
+  const seen = localStorage.getItem(key);
+  if (seen === APP_VERSION) return; // already seen this version
+
+  // Only show to returning users (not on first ever login)
+  const profileKey = `ll_has_logged_in_${username}`;
+  const isReturning = localStorage.getItem(profileKey) === 'true';
+  localStorage.setItem(profileKey, 'true');
+  if (!isReturning) { localStorage.setItem(key, APP_VERSION); return; }
+
+  // Build modal
+  const overlay = document.createElement('div');
+  overlay.id = 'whatsNewOverlay';
+  overlay.style.cssText = [
+    'position:fixed','inset:0','z-index:800',
+    'background:rgba(0,0,0,.75)','display:flex',
+    'align-items:center','justify-content:center',
+    'padding:1rem','backdrop-filter:blur(10px)'
+  ].join(';');
+
+  overlay.innerHTML = `
+    <div style="
+      background:var(--bg2);border:1px solid var(--border2);
+      border-radius:var(--radius-xl);padding:2rem;
+      max-width:460px;width:100%;
+      box-shadow:0 24px 64px rgba(0,0,0,.6);
+      animation:fadeUp 280ms ease both;
+      max-height:90vh;overflow-y:auto;
+    ">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1.5rem;gap:1rem">
+        <div>
+          <div style="font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:.3rem">
+            What's new in v${APP_VERSION}
+          </div>
+          <h2 style="font-size:1.4rem;font-weight:700;letter-spacing:-.02em;line-height:1.2">
+            LocalLogger Update 🎉
+          </h2>
+        </div>
+        <button id="whatsNewClose" style="
+          background:none;border:none;color:var(--text3);
+          font-size:1.5rem;cursor:pointer;line-height:1;
+          padding:.2rem;flex-shrink:0;margin-top:.1rem
+        ">×</button>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:.85rem;margin-bottom:1.75rem">
+        ${WHATS_NEW.map(item => `
+          <div style="
+            display:flex;gap:.85rem;align-items:flex-start;
+            padding:.85rem 1rem;
+            background:var(--bg3);
+            border:1px solid var(--border);
+            border-radius:var(--radius-lg);
+          ">
+            <span style="font-size:1.4rem;line-height:1;flex-shrink:0;margin-top:.1rem">${item.emoji}</span>
+            <div>
+              <div style="font-weight:600;font-size:.9rem;margin-bottom:.2rem;line-height:1.3">${item.title}</div>
+              <div style="font-size:.8rem;color:var(--text2);line-height:1.6">${item.body}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+
+      <button id="whatsNewDismiss" style="
+        width:100%;background:var(--accent);color:#fff;
+        border:none;border-radius:var(--radius);
+        padding:.65rem 1.25rem;font-size:.9rem;font-weight:600;
+        cursor:pointer;font-family:var(--font-body);
+        box-shadow:0 2px 12px rgba(var(--accent-rgb),.3);
+        transition:opacity .15s ease;
+      ">Got it!</button>
+    </div>`;
+
+  document.body.appendChild(overlay);
+
+  function dismiss() {
+    localStorage.setItem(key, APP_VERSION);
+    overlay.style.transition = 'opacity 200ms ease';
+    overlay.style.opacity = '0';
+    setTimeout(() => overlay.remove(), 210);
+  }
+
+  overlay.querySelector('#whatsNewClose').onclick   = dismiss;
+  overlay.querySelector('#whatsNewDismiss').onclick = dismiss;
+  overlay.addEventListener('click', e => { if (e.target === overlay) dismiss(); });
+}
+
 /* ── Profile selector ─────────────────────────────── */
 async function showProfileSelector() {
   const profiles = (await getProfiles()).sort((a,b) => new Date(b.lastLogin) - new Date(a.lastLogin));
@@ -236,6 +357,9 @@ async function loginAs(username, viewOnly = false) {
 
   const hash = location.hash.slice(1) || 'dashboard';
   dispatch(hash);
+
+  // Show "what's new" popup for returning users on version bump
+  setTimeout(() => showWhatsNewIfNeeded(username), 800);
 
   // Auto-refresh wishlist prices on login (Section 3)
   if (!viewOnly) {
