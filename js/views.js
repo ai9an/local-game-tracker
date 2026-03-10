@@ -671,47 +671,64 @@ export async function renderGameDetail(id) {
       return;
     }
 
-    // Convert any image to a data URL for the crop canvas.
-    // Key insight: the <img> element already has the pixels loaded in the browser.
-    // Drawing it to a canvas works even for IGDB/Steam URLs that block fetch() via CORS,
-    // because same-origin canvas tainting only matters if we try to *read* pixels from
-    // a canvas that had a cross-origin image drawn WITHOUT crossOrigin attribute set.
-    // The already-displayed imgEl has no crossOrigin attr, so we just draw it directly.
-    function getDataUrlFromImgEl(el) {
+    // Load image as a data URL ready for the crop canvas.
+    // Strategy:
+    //  1. If already a data URL (custom upload) — use directly.
+    //  2. Re-fetch with crossOrigin="anonymous" — works for IGDB (Cloudinary CDN sends
+    //     Access-Control-Allow-Origin: *) and Steam CDN.
+    //     Must be a fresh Image() with crossOrigin set BEFORE src is assigned,
+    //     otherwise the browser uses the cached no-cors version and taints the canvas.
+    //  3. Fallback: try corsproxy.io (already used elsewhere in the app).
+    function loadCrossOriginImage(url) {
       return new Promise((resolve, reject) => {
-        const c = document.createElement('canvas');
-        c.width  = el.naturalWidth  || el.width  || 400;
-        c.height = el.naturalHeight || el.height || 600;
-        // Wait for image to be fully decoded
-        if (el.complete && el.naturalWidth > 0) {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
           try {
-            c.getContext('2d').drawImage(el, 0, 0);
+            const c = document.createElement('canvas');
+            c.width = img.naturalWidth; c.height = img.naturalHeight;
+            c.getContext('2d').drawImage(img, 0, 0);
             resolve(c.toDataURL('image/jpeg', 0.95));
-          } catch (e) {
-            reject(e);
-          }
-        } else {
-          el.onload = () => {
-            try {
-              c.getContext('2d').drawImage(el, 0, 0);
-              resolve(c.toDataURL('image/jpeg', 0.95));
-            } catch (e) { reject(e); }
-          };
-          el.onerror = () => reject(new Error('Image failed to load'));
-        }
+          } catch (e) { reject(e); }
+        };
+        img.onerror = () => reject(new Error('Load failed'));
+        // Cache-bust so browser makes a fresh CORS request (not reuse no-cors cached copy)
+        img.src = url + (url.includes('?') ? '&' : '?') + '_cors=1';
+      });
+    }
+
+    function loadViaCorsProxy(url) {
+      return new Promise((resolve, reject) => {
+        const proxied = 'https://corsproxy.io/?' + encodeURIComponent(url);
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          try {
+            const c = document.createElement('canvas');
+            c.width = img.naturalWidth; c.height = img.naturalHeight;
+            c.getContext('2d').drawImage(img, 0, 0);
+            resolve(c.toDataURL('image/jpeg', 0.95));
+          } catch (e) { reject(e); }
+        };
+        img.onerror = () => reject(new Error('Proxy load failed'));
+        img.src = proxied;
       });
     }
 
     let cropSrc;
     try {
       if (src.startsWith('data:')) {
-        cropSrc = src; // already a data URL, use directly
+        cropSrc = src;
       } else {
-        // Draw the already-displayed <img> to canvas — bypasses CORS for display-only images
-        cropSrc = await getDataUrlFromImgEl(imgEl);
+        // Try direct CORS load first, fall back to proxy
+        try {
+          cropSrc = await loadCrossOriginImage(src);
+        } catch {
+          cropSrc = await loadViaCorsProxy(src);
+        }
       }
     } catch (e) {
-      toast('Could not prepare poster for cropping: ' + e.message, 'error');
+      toast('Could not load poster for cropping. Try saving a custom image first.', 'error');
       return;
     }
 
@@ -3122,7 +3139,7 @@ export async function renderSettings() {
 
       <!-- Section 6: Version number -->
       <div style="text-align:center;padding:1.5rem 0 .5rem;color:var(--text3);font-size:.75rem;font-family:var(--font-mono)">
-        LocalLogger — Version 1.4
+        LocalLogger — Version 1.4.1
       </div>
 
     </div>`;
